@@ -1,0 +1,10 @@
+[build]
+  # The Next.js application lives here; the repository root is the Python API.
+  base = "frontend"
+  command = "pnpm build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+  PNPM_FLAGS = "--shamefully-hoist"
+
