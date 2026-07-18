@@ -1,0 +1,1 @@
+import type { Metadata } from "next";export const metadata:Metadata={title:"Connect ESPN League",robots:{index:false,follow:false}};export default function Layout({children}:{children:React.ReactNode}){return children}

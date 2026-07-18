@@ -1,0 +1,1 @@
+import { Shell } from "../../../components/Shell";import { PlayerPage } from "../../../components/AdvancedPages";export default async function Page({params}:{params:Promise<{playerId:string}>}){const {playerId}=await params;return <Shell><PlayerPage id={playerId}/></Shell>}
