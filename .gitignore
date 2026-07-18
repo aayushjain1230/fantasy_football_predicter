@@ -1,9 +1,60 @@
+# Real environment files and local overrides
 .env
+.env.*
+!.env.example
+*.env.local
+.envrc
+
+# Credentials, cookies, certificates, and private keys
+credentials.json
+credentials.*.json
+secrets.json
+secrets.*.json
+cookies.txt
+cookies.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, caches, and coverage
 .venv/
+venv/
+env/
 __pycache__/
 .pytest_cache/
-*.pyc
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.py[cod]
+
+# Local databases and provider caches
 *.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+cache/
+
+# Node and Next.js generated files
 node_modules/
 .next/
+.pnpm-store/
+coverage/
 
+# Runtime output
+*.log
+*.pid
+logs/
+generated-reports/
+downloads/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Docker overrides
+docker-compose.override.yml
