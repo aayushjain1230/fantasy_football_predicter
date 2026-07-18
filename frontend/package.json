@@ -1,7 +1,6 @@
 {
   "name": "fourth-down-web",
   "private": true,
-  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

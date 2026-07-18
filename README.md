@@ -639,6 +639,8 @@ Google cannot index a localhost installation.
 
 The repository is already configured by `netlify.toml`. Netlify must build the
 Git repository; do not drag-and-drop `.next` or upload it as a static folder.
+The root and frontend `.nvmrc` files pin Node.js 20. The committed pnpm lockfile
+selects pnpm without requiring Corepack to verify a `packageManager` signature.
 
 1. In Netlify, connect this GitHub repository using **Add new project** >
    **Import an existing project**.
