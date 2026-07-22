@@ -97,7 +97,7 @@ async def connect(req: ConnectRequest):
         raise AppError(504,"ESPN_TIMEOUT","ESPN took too long to respond.","Your information is probably correct. Wait a minute and try connecting again.",True) from exc
     except httpx.HTTPStatusError as exc:
         status=exc.response.status_code
-        if status==404: raise AppError(404,"LEAGUE_NOT_FOUND","No ESPN league was found with that ID for this season.","Check for a mistyped league ID and confirm the season year, then try again.") from exc
+        if status==404: raise AppError(404,"LEAGUE_NOT_FOUND","That ESPN league ID does not exist for the selected season.","Check the league ID and season for a typo. If the league is private, also verify your ESPN credentials.") from exc
         if status in {401,403}: raise AppError(401,"ESPN_AUTH_REQUIRED","ESPN would not allow access to this league.","If the league is private, refresh ESPN_S2 and ESPN_SWID from your logged-in browser, restart Fourth Down, and try again.") from exc
         if status==429: raise AppError(429,"ESPN_RATE_LIMITED","ESPN is temporarily limiting connection requests.","Wait a few minutes before trying again.",True) from exc
         raise AppError(502,"ESPN_ERROR",f"ESPN returned an unexpected response ({status}).","Wait briefly and retry. If it continues, confirm the league still opens in ESPN.",True) from exc
