@@ -6,15 +6,16 @@ from datetime import UTC, datetime
 
 import httpx
 
+from .config import CONFIG
 from .demo import demo_league
-from .domain import DataState, League, ProviderStatus
+from .domain import DataState, League, LeagueRuleSet, Matchup, ProviderStatus
 
 
 async def connect_espn(league_id: str, season: int, team_id: str | None = None) -> League:
     if league_id == "demo": return demo_league()
     cookies = {}
-    if os.getenv("ESPN_S2") and os.getenv("ESPN_SWID"):
-        cookies = {"espn_s2": os.environ["ESPN_S2"], "SWID": os.environ["ESPN_SWID"]}
+    if CONFIG.espn_s2 and CONFIG.espn_swid and not CONFIG.cloud_mode:
+        cookies = {"espn_s2": CONFIG.espn_s2, "SWID": CONFIG.espn_swid}
     url = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{league_id}"
     params = [("view", v) for v in ("mSettings", "mTeam", "mRoster", "mMatchup")]
     async with httpx.AsyncClient(timeout=15, cookies=cookies) as client:
@@ -52,7 +53,11 @@ async def connect_espn(league_id: str, season: int, team_id: str | None = None) 
             if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
             injury = str(source.get("injuryStatus", "ACTIVE")).replace("_", " ")
             players.append(__import__('app.domain',fromlist=['Player']).Player(id=str(source.get("id")),name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,mean),stdev=max(2.5,mean*.32),availability=.7 if injury in {"QUESTIONABLE","DOUBTFUL"} else 0 if injury in {"OUT","INJURY RESERVE"} else 1,injury_status=injury,rostered=True))
-        teams.append(Team(id=str(t["id"]), name=(t.get("location", "") + " " + t.get("nickname", "Team")).strip(), record=f"{t.get('record', {}).get('overall', {}).get('wins', 0)}-{t.get('record', {}).get('overall', {}).get('losses', 0)}", players=players))
+        overall = t.get("record", {}).get("overall", {})
+        wins = float(overall.get("wins", 0) or 0)
+        losses = float(overall.get("losses", 0) or 0)
+        ties = float(overall.get("ties", 0) or 0)
+        teams.append(Team(id=str(t["id"]), name=(t.get("location", "") + " " + t.get("nickname", "Team")).strip(), record=f"{int(wins)}-{int(losses)}" + (f"-{int(ties)}" if ties else ""), players=players, division_id=str(t.get("divisionId")) if t.get("divisionId") is not None else None, wins=wins, losses=losses, ties=ties, points_for=float(overall.get("pointsFor", overall.get("points", 0)) or 0), points_against=float(overall.get("pointsAgainst", 0) or 0)))
     chosen = team_id or (teams[0].id if teams else "1")
     if teams and not any(team.id==str(chosen) for team in teams):
         raise ValueError("TEAM_NOT_FOUND")
@@ -79,15 +84,45 @@ async def connect_espn(league_id: str, season: int, team_id: str | None = None) 
         free_agents=[]
     scoring_items=settings.get("scoringSettings",{}).get("scoringItems",[])
     scoring={str(item.get("statId")):float(item.get("points",0) or 0) for item in scoring_items if item.get("statId") is not None}
-    return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=int(raw.get("scoringPeriodId", 1)), user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, scoring=scoring, playoff_team_count=int(settings.get("scheduleSettings",{}).get("playoffTeamCount",4)), acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"))
+    schedule_settings = settings.get("scheduleSettings", {})
+    current_period = int(raw.get("scoringPeriodId", 1))
+    schedule: list[Matchup] = []
+    for item in raw.get("schedule", []):
+        home = item.get("home") or {}
+        away = item.get("away") or {}
+        home_id = home.get("teamId")
+        away_id = away.get("teamId")
+        if home_id is None or away_id is None:
+            continue
+        period = int(item.get("matchupPeriodId", item.get("scoringPeriodId", current_period)) or current_period)
+        home_score = home.get("totalPoints")
+        away_score = away.get("totalPoints")
+        is_complete = bool(item.get("winner")) or period < current_period
+        is_current = period == current_period and not is_complete
+        schedule.append(Matchup(id=str(item.get("id") or f"{period}-{home_id}-{away_id}"), period=period, home_team_id=str(home_id), away_team_id=str(away_id), home_score=float(home_score) if home_score is not None else None, away_score=float(away_score) if away_score is not None else None, is_complete=is_complete, is_current=is_current, is_playoff=period >= int(schedule_settings.get("playoffMatchupPeriodLength", 1) or 1) + int(schedule_settings.get("matchupPeriodCount", 14) or 14), raw=item))
+    regular_season_end = int(schedule_settings.get("matchupPeriodCount", 14) or 14)
+    playoff_team_count = int(schedule_settings.get("playoffTeamCount", 4) or 4)
+    first_byes = 2 if playoff_team_count in {6, 10} else 0
+    unsupported = []
+    assumptions = ["Seeding uses overall record, then points for, unless ESPN exposes a supported tiebreaker."]
+    if not schedule:
+        unsupported.append("ESPN schedule unavailable in response; schedule-aware simulation is disabled until a schedule is available.")
+    if schedule_settings.get("matchupPeriodLength") not in (None, 1):
+        unsupported.append("Nonstandard regular-season matchup period length is preserved but not fully supported.")
+    if schedule_settings.get("playoffMatchupPeriodLength") not in (None, 1):
+        assumptions.append("Multi-week playoff length is preserved for display; Phase 4 simulator treats supported fixture playoffs as one scoring period per round unless raw settings are clear.")
+    rules = LeagueRuleSet(regular_season_start=1, regular_season_end=regular_season_end, playoff_start=regular_season_end + 1, playoff_end=int(schedule_settings.get("playoffMatchupPeriodCount", regular_season_end + 3) or regular_season_end + 3), playoff_matchup_period_length=int(schedule_settings.get("playoffMatchupPeriodLength", 1) or 1), first_round_byes=first_byes, tiebreaker="record_then_points_for", reseeding="fixed", unsupported=unsupported, assumptions=assumptions, raw=schedule_settings)
+    return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=settings)
 
 
 def statuses(demo: bool = True) -> list[ProviderStatus]:
+    from .persistence import cache_get
     now = datetime.now(UTC).isoformat()
+    odds_cache = cache_get("odds:nfl")
     return [
-        ProviderStatus(provider="ESPN", category="League data", state=DataState.MOCK if demo else DataState.LIVE, updated=now, impact="Demo league" if demo else "Roster and scoring are current"),
-        ProviderStatus(provider="The Odds API", category="Vegas game lines", state=DataState.UNAVAILABLE if not os.getenv("ODDS_API_KEY") else DataState.CACHED, key_configured=bool(os.getenv("ODDS_API_KEY")), impact="Neutral baseline; configure the optional free key" if not os.getenv("ODDS_API_KEY") else "Markets included in projections"),
-        ProviderStatus(provider="Open-Meteo", category="Weather", state=DataState.CACHED, updated=now, impact="No severe weather adjustment in demo"),
-        ProviderStatus(provider="nflverse", category="Usage and injuries", state=DataState.MOCK if demo else DataState.CACHED, updated=now, impact="Role signals are labeled demo" if demo else "Usage context included"),
-        ProviderStatus(provider="Player props", category="Player markets", state=DataState.UNAVAILABLE, impact="Optional; projections use game-level markets"),
+        ProviderStatus(provider="ESPN", category="League data", state=DataState.DEMO if demo else DataState.LIVE, updated=now if not demo else None, used_by=["rosters","lineup slots","baseline projections","free agents"], impact="Clearly labeled sample league" if demo else "Roster, scoring, lineup slots, and baseline projections were loaded for this session", unavailable_behavior="Demo mode remains available; private leagues require local credentials in Phase 1."),
+        ProviderStatus(provider="The Odds API", category="Vegas game lines", state=DataState(odds_cache["status"]) if odds_cache else DataState.UNAVAILABLE, updated=odds_cache["fetched_at"] if odds_cache else None, key_configured=bool(CONFIG.odds_api_key), used_by=["bounded projection adjustment"], impact="Cached game totals can modestly adjust projections" if odds_cache else "No market adjustment is applied", unavailable_behavior="Projection uses the ESPN/demo baseline and marks game markets as missing."),
+        ProviderStatus(provider="Open-Meteo", category="Weather", state=DataState.UNAVAILABLE, key_configured=False, used_by=["bounded projection adjustment when explicitly refreshed"], impact="Not refreshed for this session", unavailable_behavior="No weather adjustment is applied and stadium weather is marked missing."),
+        ProviderStatus(provider="nflverse", category="Open NFL roster data", state=DataState.UNAVAILABLE, key_configured=False, used_by=[], impact="Downloaded data is not yet parsed into projections in Phase 1", unavailable_behavior="No usage or injury adjustment is made from nflverse."),
+        ProviderStatus(provider="Player props", category="Player markets", state=DataState.UNAVAILABLE, key_configured=False, used_by=[], impact="Not integrated in Phase 1", unavailable_behavior="Player prop inputs are listed as missing and confidence is reduced."),
     ]

@@ -1,0 +1,70 @@
+{
+  "algorithm": "ridge_linear_regression",
+  "coefficients": {
+    "external_baseline": 1.8699225409085587,
+    "games_played": -0.3934063735172797,
+    "intercept": -17.915210600889647,
+    "position_mean_prior": -0.16268476585406647,
+    "prev_points": 0.1064775702319416,
+    "rolling3_points": 0.30262731854950575,
+    "rolling5_points": -0.24047924539711651
+  },
+  "evaluation": {
+    "test": {
+      "baseline_improvement_pct": 20.26,
+      "baseline_mae": 3.0,
+      "interval_coverage_80": 0.5,
+      "mae": 2.392,
+      "mean_bias": -2.392,
+      "median_absolute_error": 2.392,
+      "r2": -3.745,
+      "rmse": 2.396,
+      "sample_size": 2
+    },
+    "validation": {
+      "baseline_improvement_pct": 67.35,
+      "baseline_mae": 7.117,
+      "interval_coverage_80": 0.5,
+      "mae": 2.324,
+      "mean_bias": -2.324,
+      "median_absolute_error": 2.324,
+      "r2": 0.764,
+      "rmse": 3.16,
+      "sample_size": 2
+    }
+  },
+  "features": [
+    "prev_points",
+    "rolling3_points",
+    "rolling5_points",
+    "games_played",
+    "position_mean_prior",
+    "external_baseline"
+  ],
+  "interval": {
+    "half_width": 0.182,
+    "level": 0.8,
+    "method": "validation_absolute_residual"
+  },
+  "metadata": {
+    "algorithm": "ridge_linear_regression",
+    "created_at": "2026-08-01T20:05:41.530587+00:00",
+    "dataset_fingerprint": "c18dcf1731c9cfac",
+    "feature_names": [
+      "prev_points",
+      "rolling3_points",
+      "rolling5_points",
+      "games_played",
+      "position_mean_prior",
+      "external_baseline"
+    ],
+    "leakage_policy": "rolling and aggregate features are shifted; current-week stats and future games are excluded",
+    "model_version": "phase2_fixture_v1",
+    "position": "QB",
+    "scoring_basis": "canonical_ppr_fixture",
+    "test_period": "2024 weeks 3-4 fixture",
+    "training_cutoff": "2023",
+    "training_start": "2022",
+    "validation_period": "2024 weeks 1-2"
+  }
+}

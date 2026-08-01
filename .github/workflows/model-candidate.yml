@@ -1,0 +1,50 @@
+name: Model Candidate Validation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate-model-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "./backend[dev]" -r requirements.txt
+
+      - name: Validate source data
+        run: |
+          python scripts/validate_data_quality.py
+
+      - name: Build and evaluate fixture candidate
+        run: |
+          python scripts/build_training_dataset.py
+          python scripts/train_projection_models.py
+          python scripts/evaluate_projection_models.py
+
+      - name: Validate artifact loading
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "backend")
+          from app.artifacts import projection_artifact_summary
+          summary = projection_artifact_summary()
+          print(summary)
+          if summary["valid_artifacts"] != summary["total_artifacts"]:
+              raise SystemExit("candidate artifacts failed validation")
+          PY
+
+      - name: Upload evaluation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-candidate-evaluation
+          path: |
+            models/projections/latest/evaluation.json
+            models/projections/latest/manifest.json

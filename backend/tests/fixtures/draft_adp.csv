@@ -1,0 +1,25 @@
+season,snapshot_date,provider,platform,scoring_format,league_size,draft_type,player_id,player_name,position,team,adp
+2022,2022-08-25,fixture,platform_a,ppr,12,snake,qb_a,Test Quarterback,QB,BAL,42
+2022,2022-08-25,fixture,platform_b,ppr,12,snake,qb_a,Test Quarterback,QB,BAL,46
+2022,2022-08-25,fixture,platform_a,ppr,12,snake,rb_a,Test Runner,RB,ATL,10
+2022,2022-08-25,fixture,platform_b,ppr,12,snake,rb_a,Test Runner,RB,ATL,12
+2022,2022-08-25,fixture,platform_a,ppr,12,snake,wr_a,Test Wideout,WR,DET,18
+2022,2022-08-25,fixture,platform_b,ppr,12,snake,wr_a,Test Wideout,WR,DET,21
+2022,2022-08-25,fixture,platform_a,ppr,12,snake,te_a,Test Tight End,TE,ARI,58
+2022,2022-08-25,fixture,platform_b,ppr,12,snake,te_a,Test Tight End,TE,ARI,62
+2023,2023-08-25,fixture,platform_a,ppr,12,snake,qb_a,Test Quarterback,QB,BAL,38
+2023,2023-08-25,fixture,platform_b,ppr,12,snake,qb_a,Test Quarterback,QB,BAL,41
+2023,2023-08-25,fixture,platform_a,ppr,12,snake,rb_a,Test Runner,RB,ATL,8
+2023,2023-08-25,fixture,platform_b,ppr,12,snake,rb_a,Test Runner,RB,ATL,11
+2023,2023-08-25,fixture,platform_a,ppr,12,snake,wr_a,Test Wideout,WR,DET,16
+2023,2023-08-25,fixture,platform_b,ppr,12,snake,wr_a,Test Wideout,WR,DET,18
+2023,2023-08-25,fixture,platform_a,ppr,12,snake,te_a,Test Tight End,TE,ARI,52
+2023,2023-08-25,fixture,platform_b,ppr,12,snake,te_a,Test Tight End,TE,ARI,56
+2024,2024-08-25,fixture,platform_a,ppr,12,snake,qb_a,Test Quarterback,QB,BAL,34
+2024,2024-08-25,fixture,platform_b,ppr,12,snake,qb_a,Test Quarterback,QB,BAL,37
+2024,2024-08-25,fixture,platform_a,ppr,12,snake,rb_a,Test Runner,RB,ATL,7
+2024,2024-08-25,fixture,platform_b,ppr,12,snake,rb_a,Test Runner,RB,ATL,10
+2024,2024-08-25,fixture,platform_a,ppr,12,snake,wr_a,Test Wideout,WR,DET,14
+2024,2024-08-25,fixture,platform_b,ppr,12,snake,wr_a,Test Wideout,WR,DET,17
+2024,2024-08-25,fixture,platform_a,ppr,12,snake,te_a,Test Tight End,TE,ARI,48
+2024,2024-08-25,fixture,platform_b,ppr,12,snake,te_a,Test Tight End,TE,ARI,52

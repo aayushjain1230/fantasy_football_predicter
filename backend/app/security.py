@@ -6,9 +6,10 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from .errors import error_payload
+from .config import CONFIG
 
-MAX_BODY_BYTES=int(os.getenv("MAX_REQUEST_BYTES","1048576")); SAFE_METHODS={"GET","HEAD","OPTIONS"}
-def allowed_origins()->set[str]: return {x.strip().rstrip("/") for x in os.getenv("ALLOWED_ORIGINS","http://localhost:3000,http://127.0.0.1:3000").split(",") if x.strip()}
+MAX_BODY_BYTES=CONFIG.max_request_bytes; SAFE_METHODS={"GET","HEAD","OPTIONS"}
+def allowed_origins()->set[str]: return set(CONFIG.allowed_origins)
 class SlidingWindowLimiter:
     def __init__(self): self.events=defaultdict(deque); self.lock=threading.Lock()
     def allow(self,key:str,limit:int,window:int=60):

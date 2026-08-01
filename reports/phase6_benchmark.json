@@ -1,0 +1,45 @@
+{
+  "report": "Phase 6 deterministic demo benchmark",
+  "rows": [
+    {
+      "operation": "weekly brief",
+      "elapsed_ms": 4349.46,
+      "ok": true
+    },
+    {
+      "operation": "player projection",
+      "elapsed_ms": 2.33,
+      "ok": true
+    },
+    {
+      "operation": "lineup optimization",
+      "elapsed_ms": 32.2,
+      "ok": true
+    },
+    {
+      "operation": "waiver analysis",
+      "elapsed_ms": 1256.8,
+      "ok": true
+    },
+    {
+      "operation": "trade evaluation",
+      "elapsed_ms": 70.02,
+      "ok": true
+    },
+    {
+      "operation": "quick simulation",
+      "elapsed_ms": 130.24,
+      "ok": true
+    },
+    {
+      "operation": "standard simulation",
+      "elapsed_ms": 141.74,
+      "ok": true
+    },
+    {
+      "operation": "player search filter",
+      "elapsed_ms": 0.01,
+      "ok": true
+    }
+  ]
+}

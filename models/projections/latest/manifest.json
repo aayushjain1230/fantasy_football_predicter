@@ -1,0 +1,102 @@
+{
+  "dataset_fingerprint": "c18dcf1731c9cfac",
+  "model_version": "phase2_fixture_v1",
+  "positions": {
+    "QB": {
+      "test": {
+        "baseline_improvement_pct": 20.26,
+        "baseline_mae": 3.0,
+        "interval_coverage_80": 0.5,
+        "mae": 2.392,
+        "mean_bias": -2.392,
+        "median_absolute_error": 2.392,
+        "r2": -3.745,
+        "rmse": 2.396,
+        "sample_size": 2
+      },
+      "validation": {
+        "baseline_improvement_pct": 67.35,
+        "baseline_mae": 7.117,
+        "interval_coverage_80": 0.5,
+        "mae": 2.324,
+        "mean_bias": -2.324,
+        "median_absolute_error": 2.324,
+        "r2": 0.764,
+        "rmse": 3.16,
+        "sample_size": 2
+      }
+    },
+    "RB": {
+      "test": {
+        "baseline_improvement_pct": 35.65,
+        "baseline_mae": 3.65,
+        "interval_coverage_80": 0.5,
+        "mae": 2.349,
+        "mean_bias": 1.47,
+        "median_absolute_error": 2.349,
+        "r2": -1.507,
+        "rmse": 2.771,
+        "sample_size": 2
+      },
+      "validation": {
+        "baseline_improvement_pct": -32.75,
+        "baseline_mae": 3.433,
+        "interval_coverage_80": 0.5,
+        "mae": 4.558,
+        "mean_bias": 4.558,
+        "median_absolute_error": 4.558,
+        "r2": -1.885,
+        "rmse": 4.586,
+        "sample_size": 2
+      }
+    },
+    "TE": {
+      "test": {
+        "baseline_improvement_pct": 97.17,
+        "baseline_mae": 10.433,
+        "interval_coverage_80": 0.5,
+        "mae": 0.295,
+        "mean_bias": 0.295,
+        "median_absolute_error": 0.295,
+        "r2": 0.998,
+        "rmse": 0.313,
+        "sample_size": 2
+      },
+      "validation": {
+        "baseline_improvement_pct": 94.16,
+        "baseline_mae": 7.65,
+        "interval_coverage_80": 0.5,
+        "mae": 0.446,
+        "mean_bias": 0.446,
+        "median_absolute_error": 0.446,
+        "r2": 0.993,
+        "rmse": 0.472,
+        "sample_size": 2
+      }
+    },
+    "WR": {
+      "test": {
+        "baseline_improvement_pct": 93.1,
+        "baseline_mae": 12.917,
+        "interval_coverage_80": 0.5,
+        "mae": 0.892,
+        "mean_bias": 0.486,
+        "median_absolute_error": 0.892,
+        "r2": 0.989,
+        "rmse": 1.016,
+        "sample_size": 2
+      },
+      "validation": {
+        "baseline_improvement_pct": 90.34,
+        "baseline_mae": 8.867,
+        "interval_coverage_80": 0.5,
+        "mae": 0.857,
+        "mean_bias": 0.857,
+        "median_absolute_error": 0.857,
+        "r2": 0.984,
+        "rmse": 0.875,
+        "sample_size": 2
+      }
+    }
+  }
+}

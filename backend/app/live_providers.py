@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
+from .config import CONFIG
 from .persistence import cache_get, cache_set
 
 STADIUMS = {
@@ -31,10 +32,10 @@ async def odds(force: bool = False) -> dict:
         fetched=datetime.fromisoformat(cached["fetched_at"])
         if datetime.now(UTC)-fetched < timedelta(minutes=15): return {**cached,"quota_guard":"Refresh suppressed: minimum 15-minute interval"}
     if cached and not force and cached["status"] != "STALE": return cached
-    key = os.getenv("ODDS_API_KEY")
+    key = CONFIG.odds_api_key
     if not key: return cached or {"status": "UNAVAILABLE", "payload": [], "error": "ODDS_API_KEY is not configured"}
     url = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds"
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=min(20, CONFIG.provider_timeout_seconds + 5)) as client:
         response = await client.get(url, params={"apiKey": key, "regions": "us", "markets": "h2h,spreads,totals", "oddsFormat": "american"})
     response.raise_for_status(); payload = response.json(); now = datetime.now(UTC)
     cache_set("odds:nfl", "The Odds API", payload, now.isoformat(), (now + timedelta(hours=6)).isoformat())
@@ -47,7 +48,7 @@ async def weather(team: str, force: bool = False) -> dict:
     if stadium["dome"]: return {"status": "LIVE", "stadium": stadium, "payload": {"dome": True, "impact": "No outdoor weather adjustment"}}
     cache_key = f"weather:{team}"; cached = cache_get(cache_key)
     if cached and not force and cached["status"] != "STALE": return {**cached, "stadium": stadium}
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=CONFIG.provider_timeout_seconds) as client:
         response = await client.get("https://api.open-meteo.com/v1/forecast", params={"latitude": stadium["lat"], "longitude": stadium["lon"], "hourly": "temperature_2m,precipitation_probability,wind_speed_10m,wind_gusts_10m", "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "forecast_days": 7, "timezone": "America/New_York"})
     response.raise_for_status(); payload=response.json(); now=datetime.now(UTC)
     cache_set(cache_key,"Open-Meteo",payload,now.isoformat(),(now+timedelta(hours=3)).isoformat())
@@ -58,7 +59,7 @@ async def nflverse_rosters(season: int, force: bool = False) -> dict:
     key=f"nflverse:rosters:{season}"; cached=cache_get(key)
     if cached and not force and cached["status"] != "STALE": return cached
     url=f"https://github.com/nflverse/nflverse-data/releases/download/rosters/roster_{season}.csv"
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client: response=await client.get(url)
+    async with httpx.AsyncClient(timeout=max(20, CONFIG.provider_timeout_seconds), follow_redirects=True) as client: response=await client.get(url)
     response.raise_for_status(); text=response.text; now=datetime.now(UTC)
     cache_set(key,"nflverse",{"csv":text},now.isoformat(),(now+timedelta(days=1)).isoformat())
     return {"status":"LIVE","payload":{"csv":text}}

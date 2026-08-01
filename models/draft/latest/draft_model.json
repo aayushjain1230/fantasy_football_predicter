@@ -1,0 +1,126 @@
+{
+  "class_rates": {
+    "QB": {
+      "MEET EXPECTATIONS": 0.6,
+      "OUTPERFORM": 0.2,
+      "UNDERPERFORM": 0.2
+    },
+    "RB": {
+      "MEET EXPECTATIONS": 0.6,
+      "OUTPERFORM": 0.2,
+      "UNDERPERFORM": 0.2
+    },
+    "TE": {
+      "MEET EXPECTATIONS": 0.6,
+      "OUTPERFORM": 0.2,
+      "UNDERPERFORM": 0.2
+    },
+    "WR": {
+      "MEET EXPECTATIONS": 0.6,
+      "OUTPERFORM": 0.2,
+      "UNDERPERFORM": 0.2
+    }
+  },
+  "evaluation": {
+    "adp_baseline_mae": 29.375,
+    "baseline_improvement_pct": 100.0,
+    "macro_accuracy_fixture": 1,
+    "multiclass_brier": 0.299,
+    "residual_mae": 0.0,
+    "sample_size": 4
+  },
+  "expected_value_curves": {
+    "QB": [
+      {
+        "bucket": 2,
+        "expected_vor": 65.0,
+        "lower": 55.0,
+        "median": 65.0,
+        "sample_size": 2,
+        "upper": 75.0
+      }
+    ],
+    "RB": [
+      {
+        "bucket": 1,
+        "expected_vor": 66.0,
+        "lower": 52.0,
+        "median": 66.0,
+        "sample_size": 2,
+        "upper": 80.0
+      }
+    ],
+    "TE": [
+      {
+        "bucket": 3,
+        "expected_vor": 73.5,
+        "lower": 60.0,
+        "median": 73.5,
+        "sample_size": 2,
+        "upper": 87.0
+      }
+    ],
+    "WR": [
+      {
+        "bucket": 1,
+        "expected_vor": 105.0,
+        "lower": 90.0,
+        "median": 105.0,
+        "sample_size": 2,
+        "upper": 120.0
+      }
+    ]
+  },
+  "metadata": {
+    "adp_sources": [
+      "fixture_platform_a",
+      "fixture_platform_b"
+    ],
+    "calibration_method": "training class-rate smoothing plus residual distance heuristic",
+    "created_at": "2026-08-01T20:05:42.171812+00:00",
+    "dataset_fingerprint": "993d469c11a53bed",
+    "feature_names": [
+      "consensus_adp",
+      "position_adp",
+      "expected_vor",
+      "phase2_expected",
+      "phase2_uncertainty",
+      "games_played_prev",
+      "age",
+      "experience",
+      "adp_dispersion"
+    ],
+    "league_assumptions": "12-team managed snake draft",
+    "model_type": "fixture_smoothed_adp_residual_model",
+    "model_version": "phase3_fixture_v1",
+    "scoring_format": "ppr",
+    "target": "ADP-relative residual in value over replacement",
+    "test_period": "fixture 2024",
+    "training_period": "fixture seasons through 2023",
+    "validation_period": "not separate in fixture; production must use chronological validation"
+  },
+  "residual_prior": {
+    "QB": 0.0,
+    "RB": 0.0,
+    "TE": 0.0,
+    "WR": 0.0
+  },
+  "thresholds": {
+    "QB": {
+      "outperform_gt": 10.0,
+      "underperform_lt": -10.0
+    },
+    "RB": {
+      "outperform_gt": 14.0,
+      "underperform_lt": -14.0
+    },
+    "TE": {
+      "outperform_gt": 13.5,
+      "underperform_lt": -13.5
+    },
+    "WR": {
+      "outperform_gt": 15.0,
+      "underperform_lt": -15.0
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "adp_baseline_mae": 29.375,
+  "baseline_improvement_pct": 100.0,
+  "macro_accuracy_fixture": 1,
+  "multiclass_brier": 0.299,
+  "residual_mae": 0.0,
+  "sample_size": 4
+}

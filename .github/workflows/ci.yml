@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "./backend[dev]" -r requirements.txt
+
+      - name: Compile Python source
+        run: |
+          python -m compileall -q backend scripts streamlit_app.py
+
+      - name: Run tests
+        run: |
+          python -m pytest backend/tests
+
+      - name: Data quality validation
+        run: |
+          python scripts/validate_data_quality.py
+
+      - name: Fixture training pipeline smoke test
+        run: |
+          python scripts/download_historical_data.py --fixture-only
+          python scripts/build_training_dataset.py
+          python scripts/train_projection_models.py
+          python scripts/evaluate_projection_models.py
+          python scripts/refresh_current_adp.py --fixture-only
+          python scripts/build_draft_dataset.py
+          python scripts/train_draft_models.py
+          python scripts/evaluate_draft_models.py
+
+      - name: Deterministic performance smoke test
+        run: |
+          python scripts/benchmark_phase6.py
+
+      - name: Secret placeholder scan
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          bad = []
+          patterns = [re.compile(r"sk-[A-Za-z0-9]{20,}"), re.compile(r"AKIA[0-9A-Z]{16}")]
+          for path in Path(".").rglob("*"):
+              if path.is_dir() or ".git" in path.parts or "node_modules" in path.parts:
+                  continue
+              if path.suffix.lower() not in {".py",".md",".toml",".yml",".yaml",".txt",".example",".json"}:
+                  continue
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              if any(pattern.search(text) for pattern in patterns):
+                  bad.append(str(path))
+          if bad:
+              raise SystemExit("Suspicious secret pattern in: " + ", ".join(bad))
+          PY
+
+      - name: Import Streamlit app
+        run: |
+          python -c "import streamlit_app; print(sorted(streamlit_app.PAGES))"
+
+      - name: Headless Streamlit smoke test
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          import time
+          import urllib.request
+
+          cmd = [
+              sys.executable,
+              "-m",
+              "streamlit",
+              "run",
+              "streamlit_app.py",
+              "--server.headless",
+              "true",
+              "--server.port",
+              "8501",
+          ]
+          proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+          try:
+              deadline = time.time() + 30
+              healthy = False
+              while time.time() < deadline:
+                  if proc.poll() is not None:
+                      output = proc.stdout.read() if proc.stdout else ""
+                      raise SystemExit(f"Streamlit exited early with {proc.returncode}\n{output}")
+                  try:
+                      with urllib.request.urlopen("http://127.0.0.1:8501/_stcore/health", timeout=2) as response:
+                          if response.status == 200:
+                              healthy = True
+                              break
+                  except Exception:
+                      time.sleep(1)
+              if not healthy:
+                  raise SystemExit("Streamlit did not become healthy within 30 seconds")
+          finally:
+              proc.terminate()
+              try:
+                  proc.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+          PY

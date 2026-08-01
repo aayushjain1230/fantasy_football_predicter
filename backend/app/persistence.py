@@ -8,10 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from .config import CONFIG
 
 def _database_path() -> Path:
-    configured = os.getenv("DATABASE_URL", "sqlite:///./fourth_down.db")
-    if os.getenv("MULTI_USER_MODE","false").lower()=="true":
+    configured = CONFIG.database_url
+    if CONFIG.multi_user_mode:
         raise RuntimeError("MULTI_USER_MODE cannot use SQLite because SQLite has no row-level security. Use an authenticated PostgreSQL deployment with enforced RLS policies.")
     if not configured.startswith("sqlite:///"):
         raise RuntimeError("This local build supports SQLite only. Do not claim PostgreSQL RLS is enabled until the PostgreSQL adapter and policies are installed and tested.")
@@ -43,6 +44,21 @@ def connection() -> Iterator[sqlite3.Connection]:
         );
         CREATE TABLE IF NOT EXISTS draft_state (
             league_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prediction_ledger (
+            prediction_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, season INTEGER NOT NULL,
+            week INTEGER NOT NULL, player_id TEXT NOT NULL, player_name TEXT NOT NULL,
+            nfl_team TEXT NOT NULL, opponent TEXT, scoring_fingerprint TEXT NOT NULL,
+            expected_points REAL NOT NULL, lower_bound REAL, upper_bound REAL,
+            win_probability REAL, model_version TEXT NOT NULL, feature_data_cutoff TEXT,
+            provider_freshness TEXT NOT NULL, fallback_used INTEGER NOT NULL,
+            eligible_for_evaluation INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS prediction_outcomes (
+            prediction_id TEXT PRIMARY KEY, outcome_recorded_at TEXT NOT NULL,
+            actual_points REAL, actual_outcome INTEGER, final_player_status TEXT,
+            evaluation_status TEXT NOT NULL, error REAL,
+            FOREIGN KEY(prediction_id) REFERENCES prediction_ledger(prediction_id)
         );
         """)
         db.commit()
@@ -90,7 +106,81 @@ def prediction_rows() -> list[dict]:
         rows = db.execute("SELECT * FROM predictions ORDER BY season,week").fetchall()
     return [dict(row) for row in rows]
 
+
+def save_prediction_ledger(row: dict) -> None:
+    with connection() as db:
+        db.execute(
+            """
+            INSERT INTO prediction_ledger(
+                prediction_id,created_at,season,week,player_id,player_name,nfl_team,opponent,
+                scoring_fingerprint,expected_points,lower_bound,upper_bound,win_probability,
+                model_version,feature_data_cutoff,provider_freshness,fallback_used,eligible_for_evaluation
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(prediction_id) DO NOTHING
+            """,
+            (
+                row["prediction_id"],
+                row["created_at"],
+                row["season"],
+                row["week"],
+                row["player_id"],
+                row["player_name"],
+                row["nfl_team"],
+                row.get("opponent"),
+                row["scoring_fingerprint"],
+                row["expected_points"],
+                row.get("lower_bound"),
+                row.get("upper_bound"),
+                row.get("win_probability"),
+                row["model_version"],
+                row.get("feature_data_cutoff"),
+                json.dumps(row.get("provider_freshness", [])),
+                1 if row.get("fallback_used") else 0,
+                1 if row.get("eligible_for_evaluation", True) else 0,
+            ),
+        )
+        db.commit()
+
+
+def attach_prediction_outcome(prediction_id: str, actual_points: float | None, actual_outcome: int | None, final_player_status: str, evaluation_status: str) -> None:
+    with connection() as db:
+        pred = db.execute("SELECT expected_points FROM prediction_ledger WHERE prediction_id=?", (prediction_id,)).fetchone()
+        error = None if pred is None or actual_points is None else float(pred["expected_points"]) - float(actual_points)
+        db.execute(
+            """
+            INSERT INTO prediction_outcomes(prediction_id,outcome_recorded_at,actual_points,actual_outcome,final_player_status,evaluation_status,error)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(prediction_id) DO UPDATE SET
+                outcome_recorded_at=excluded.outcome_recorded_at,
+                actual_points=excluded.actual_points,
+                actual_outcome=excluded.actual_outcome,
+                final_player_status=excluded.final_player_status,
+                evaluation_status=excluded.evaluation_status,
+                error=excluded.error
+            """,
+            (prediction_id, datetime.now(UTC).isoformat(), actual_points, actual_outcome, final_player_status, evaluation_status, error),
+        )
+        db.commit()
+
+
+def prediction_ledger_rows() -> list[dict]:
+    with connection() as db:
+        rows = db.execute(
+            """
+            SELECT l.*, o.actual_points, o.actual_outcome, o.final_player_status, o.evaluation_status, o.error, o.outcome_recorded_at
+            FROM prediction_ledger l
+            LEFT JOIN prediction_outcomes o ON l.prediction_id=o.prediction_id
+            ORDER BY l.season,l.week,l.created_at
+            """
+        ).fetchall()
+    values = []
+    for row in rows:
+        item = dict(row)
+        item["provider_freshness"] = json.loads(item["provider_freshness"]) if item.get("provider_freshness") else []
+        values.append(item)
+    return values
+
 def delete_all_user_data() -> None:
     with connection() as db:
-        for table in ("app_state","provider_cache","predictions","draft_state"): db.execute(f"DELETE FROM {table}")
+        for table in ("app_state","provider_cache","predictions","draft_state","prediction_outcomes","prediction_ledger"): db.execute(f"DELETE FROM {table}")
         db.commit()

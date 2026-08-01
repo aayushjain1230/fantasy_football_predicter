@@ -8,7 +8,7 @@ class DataState(StrEnum):
     LIVE = "LIVE"
     CACHED = "CACHED"
     STALE = "STALE"
-    MOCK = "MOCK"
+    DEMO = "DEMO"
     UNAVAILABLE = "UNAVAILABLE"
 
 
@@ -30,6 +30,42 @@ class Team(BaseModel):
     name: str
     record: str = "0-0"
     players: list[Player]
+    division_id: str | None = None
+    owner: str | None = None
+    wins: float = 0
+    losses: float = 0
+    ties: float = 0
+    points_for: float = 0
+    points_against: float = 0
+
+
+class LeagueRuleSet(BaseModel):
+    regular_season_start: int = 1
+    regular_season_end: int = 14
+    playoff_start: int | None = None
+    playoff_end: int | None = None
+    first_round_byes: int = 0
+    playoff_matchup_period_length: int = 1
+    tiebreaker: str = "record_then_points_for"
+    reseeding: str = "fixed"
+    median_games: bool = False
+    division_winner_priority: bool = False
+    unsupported: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    raw: dict[str, object] = Field(default_factory=dict)
+
+
+class Matchup(BaseModel):
+    id: str
+    period: int
+    home_team_id: str
+    away_team_id: str
+    home_score: float | None = None
+    away_score: float | None = None
+    is_complete: bool = False
+    is_current: bool = False
+    is_playoff: bool = False
+    raw: dict[str, object] = Field(default_factory=dict)
 
 
 class League(BaseModel):
@@ -44,17 +80,35 @@ class League(BaseModel):
     scoring: dict[str, float] = Field(default_factory=dict)
     playoff_team_count: int = 4
     acquisition_budget: int | None = None
+    rules: LeagueRuleSet = Field(default_factory=LeagueRuleSet)
+    schedule: list[Matchup] = Field(default_factory=list)
+    raw_settings: dict[str, object] = Field(default_factory=dict)
 
 
 class Projection(BaseModel):
     player_id: str
+    week: int | None = None
+    baseline_source: str = "Input projection"
+    baseline_value: float = 0
     mean: float
     floor: float
     median: float
     ceiling: float
     confidence: float
+    adjustments: list[dict[str, float | str]] = Field(default_factory=list)
+    uncertainty_label: str = "Heuristic uncertainty estimate"
+    interval_level: float | None = None
+    model_name: str = "phase1_fallback"
+    model_version: str = "phase1"
+    important_features: list[dict[str, float | str]] = Field(default_factory=list)
+    data_completeness: float = 0
+    confidence_label: str = "limited"
+    fallback_used: bool = True
+    fallback_reason: str = "Model artifact unavailable"
+    training_cutoff: str | None = None
     reasons: list[str]
     missing: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class LineupEntry(BaseModel):
@@ -72,6 +126,9 @@ class LineupResult(BaseModel):
     ceiling: float
     win_probability: float
     changes: list[str]
+    is_complete: bool = True
+    missing_slots: list[str] = Field(default_factory=list)
+    explanation: str = ""
 
 
 class WaiverMove(BaseModel):
@@ -84,6 +141,8 @@ class WaiverMove(BaseModel):
     faab_percent: int
     reasons: list[str]
     risks: list[str]
+    drop_safety: str = "Situational drop"
+    faab_guidance: dict[str, object] = Field(default_factory=dict)
 
 
 class ProviderStatus(BaseModel):
@@ -92,7 +151,9 @@ class ProviderStatus(BaseModel):
     state: DataState
     updated: str | None = None
     key_configured: bool = False
+    used_by: list[str] = Field(default_factory=list)
     impact: str
+    unavailable_behavior: str = "Calculation falls back to the baseline and lowers confidence."
 
 
 class ImpactRange(BaseModel):
@@ -140,9 +201,66 @@ class TeamStrength(BaseModel):
 
 
 class CalibrationSummary(BaseModel):
+    status: str = "UNAVAILABLE"
     sample_size: int
     points_mae: float
+    points_rmse: float = 0
+    mean_bias: float = 0
     brier_score: float
     confidence_bias: float
     verdict: str
     buckets: list[dict[str, float]]
+    minimum_sample: int = 20
+    is_demo: bool = False
+
+
+class DecisionRecommendation(BaseModel):
+    decision_id: str
+    category: str
+    priority: str
+    title: str
+    recommended_action: str
+    baseline_action: str | None = None
+    expected_points_change: float | None = None
+    win_probability_change: float | None = None
+    playoff_probability_change: float | None = None
+    lower_impact: float | None = None
+    upper_impact: float | None = None
+    confidence: str = "Medium"
+    robustness: str = "Moderately robust"
+    deadline: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    missing_inputs: list[str] = Field(default_factory=list)
+    data_freshness: list[str] = Field(default_factory=list)
+    model_versions: list[str] = Field(default_factory=list)
+    details: dict[str, object] = Field(default_factory=dict)
+
+
+class RosterPositionOutlook(BaseModel):
+    position: str
+    starter_strength: float
+    bench_depth: int
+    reliable_options: int
+    injury_exposure: str
+    weekly_volatility: str
+    drop_flexibility: str
+    summary: str
+
+
+class WeeklyBrief(BaseModel):
+    league_name: str
+    team_name: str
+    week: int
+    matchup_summary: str
+    expected_score: float
+    win_probability: float
+    playoff_probability: float | None = None
+    championship_probability: float | None = None
+    biggest_weakness: str | None = None
+    best_position: str | None = None
+    roster_summary: str
+    top_actions: list[DecisionRecommendation]
+    position_outlook: list[RosterPositionOutlook] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)

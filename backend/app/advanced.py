@@ -19,8 +19,8 @@ from .domain import (
 from .engine import optimize_lineup, project, user_team
 
 
-def roster_distribution(players: list[Player], slots: list[str], seed: int = 19) -> ImpactRange:
-    lineup = optimize_lineup(players, slots, seed=seed)
+def roster_distribution(players: list[Player], slots: list[str], seed: int = 19, league: League | None = None) -> ImpactRange:
+    lineup = optimize_lineup(players, slots, seed=seed, league=league)
     return ImpactRange(floor=lineup.floor, median=lineup.expected_score, ceiling=lineup.ceiling)
 
 
@@ -50,7 +50,7 @@ def draft_board(league: League, mode: str = "balanced") -> list[DraftRecommendat
         need = max(0, 2 - counts[player.position])
         score = vor + need * 1.5 + risk_weight * player.stdev
         survival = 1 / (1 + math.exp((score - 5) / 2.5))
-        results.append((score, DraftRecommendation(player=player, rank=0, vor=round(vor, 1), scarcity=round(scarcity, 2), survival_probability=round(survival, 2), roster_fit="Priority need" if need else "Depth and upside", risk="HIGH" if player.stdev > 5.5 else "MEDIUM" if player.stdev > 4 else "LOW", explanation=f"{player.name} adds {vor:.1f} points over the current {player.position} replacement baseline and has a {survival:.0%} modeled chance to reach the next selection.")))
+        results.append((score, DraftRecommendation(player=player, rank=0, vor=round(vor, 1), scarcity=round(scarcity, 2), survival_probability=round(survival, 2), roster_fit="Priority need" if need else "Depth and upside", risk="HIGH" if player.stdev > 5.5 else "MEDIUM" if player.stdev > 4 else "LOW", explanation=f"{player.name} adds {vor:.1f} points over the current {player.position} replacement baseline. Availability at the next pick is a heuristic score, not ADP-trained probability.")))
     ranked = []
     for rank, (_, rec) in enumerate(sorted(results, key=lambda x: x[0], reverse=True)[:12], 1):
         ranked.append(rec.model_copy(update={"rank": rank}))
@@ -71,15 +71,15 @@ def evaluate_trade(league: League, send_ids: list[str], receive_ids: list[str], 
         candidates = [p for p in after_players if p.id not in receive_ids]
         required_drop = min(candidates, key=lambda p: p.mean)
         after_players.remove(required_drop)
-    before = roster_distribution(team.players, league.roster_slots)
-    after = roster_distribution(after_players, league.roster_slots)
+    before = roster_distribution(team.players, league.roster_slots, league=league)
+    after = roster_distribution(after_players, league.roster_slots, league=league)
     delta = after.median - before.median
     playoff_delta = max(-.18, min(.18, delta / 80))
     championship_delta = max(-.12, min(.12, delta / 120))
     sent_value, received_value = sum(p.mean for p in send), sum(p.mean for p in receive)
     acceptance = 1 / (1 + math.exp((received_value - sent_value) / 4))
     verdict = "EXCELLENT" if delta >= 4 else "GOOD" if delta >= 1.5 else "NEUTRAL" if delta > -1.5 else "RISKY" if delta > -4 else "BAD"
-    return TradeResult(send=send, receive=receive, required_drop=required_drop, before=before, after=after, weekly_delta=round(delta, 1), playoff_delta=round(playoff_delta, 3), championship_delta=round(championship_delta, 3), acceptance_likelihood=round(acceptance, 2), verdict=verdict, reasons=["Evaluates the complete legal starting roster before and after the deal", f"Median weekly output changes by {delta:+.1f} points"], risks=["Acceptance is a value-balance estimate, not a prediction of another manager's behavior"])
+    return TradeResult(send=send, receive=receive, required_drop=required_drop, before=before, after=after, weekly_delta=round(delta, 1), playoff_delta=round(playoff_delta, 3), championship_delta=round(championship_delta, 3), acceptance_likelihood=round(acceptance, 2), verdict=verdict, reasons=["Evaluates the complete legal starting roster before and after the deal", f"Median weekly output changes by {delta:+.1f} points"], risks=["Value balance is heuristic and is not trained on historical trade outcomes.", "Playoff and title deltas are simplified impact scalars, not schedule-aware odds."])
 
 
 def trade_ideas(league: League) -> list[TradeResult]:
@@ -104,48 +104,57 @@ def what_if(league: League, remove_id: str, add_id: str) -> dict:
     add = next((p for p in all_players if p.id == add_id), None)
     if not remove or not add:
         raise ValueError("Both players must exist and the removed player must be on your roster")
-    before_lineup = optimize_lineup(team.players, league.roster_slots)
+    before_lineup = optimize_lineup(team.players, league.roster_slots, league=league)
     after_players = [p for p in team.players if p.id != remove_id] + [add]
-    after_lineup = optimize_lineup(after_players, league.roster_slots)
+    after_lineup = optimize_lineup(after_players, league.roster_slots, league=league)
     return {"remove": remove, "add": add, "before": before_lineup, "after": after_lineup, "score_delta": round(after_lineup.expected_score - before_lineup.expected_score, 1), "win_probability_delta": round(after_lineup.win_probability - before_lineup.win_probability, 3)}
 
 
+def _display_probability(value: float) -> float:
+    if value <= 0:
+        return 0.001
+    if value >= 1:
+        return 0.999
+    return value
+
+
 def power_rankings(league: League, simulations: int = 4000, seed: int = 31) -> list[TeamStrength]:
-    rng = random.Random(seed)
-    base = []
-    for team in league.teams:
-        if team.players:
-            lineup = optimize_lineup(team.players, league.roster_slots, opponent_mean=110, seed=seed)
-            mean, spread = lineup.expected_score, max(8, (lineup.ceiling - lineup.floor) / 2.56)
-        else:
-            mean, spread = 82, 15
-        base.append((team, mean, spread))
-    playoff_counts = defaultdict(int); title_counts = defaultdict(int); win_samples = defaultdict(list)
-    remaining_weeks = max(1, 14 - league.week)
-    for _ in range(simulations):
-        season_scores = []
-        for team, mean, spread in base:
-            wins = sum(rng.random() < 1 / (1 + math.exp(-(rng.gauss(mean, spread) - 108) / 14)) for _ in range(remaining_weeks))
-            current_wins = int(team.record.split("-")[0]) if "-" in team.record else 0
-            total = current_wins + wins
-            win_samples[team.id].append(total)
-            season_scores.append((total + rng.random() * .01, team.id))
-        season_scores.sort(reverse=True)
-        playoff_ids = [tid for _, tid in season_scores[:max(1, min(4, len(season_scores)))]]
-        for tid in playoff_ids: playoff_counts[tid] += 1
-        champion = max(playoff_ids, key=lambda tid: next(mean for team, mean, _ in base if team.id == tid) + rng.gauss(0, 18))
-        title_counts[champion] += 1
-    results = []
-    for team, mean, _ in sorted(base, key=lambda x: x[1], reverse=True):
-        samples = sorted(win_samples[team.id]); n = len(samples)
-        results.append(TeamStrength(team_id=team.id, team_name=team.name, rank=len(results)+1, expected_score=round(mean, 1), playoff_probability=round(playoff_counts[team.id]/simulations, 3), championship_probability=round(title_counts[team.id]/simulations, 3), projected_wins=round(sum(samples)/n, 1), wins_low=float(samples[int(.1*n)]), wins_high=float(samples[min(n-1, int(.9*n))])))
-    return results
+    from .simulation import simulate_league
+
+    result = simulate_league(league, simulations=simulations, seed=seed)
+    expected = {row.team_id: row.expected_score for row in result.score_distributions}
+    rows = sorted(result.teams, key=lambda row: expected.get(row.team_id, 0), reverse=True)
+    return [
+        TeamStrength(
+            team_id=row.team_id,
+            team_name=row.team_name,
+            rank=rank,
+            expected_score=round(expected.get(row.team_id, 0), 1),
+            playoff_probability=round(_display_probability(row.playoff_probability), 3),
+            championship_probability=round(_display_probability(row.championship_probability), 3),
+            projected_wins=row.expected_final_wins,
+            wins_low=row.wins_low,
+            wins_high=row.wins_high,
+        )
+        for rank, row in enumerate(rows, 1)
+    ]
 
 
-def calibration_summary() -> CalibrationSummary:
-    # Seed observations represent stored demo predictions; production persistence can append real outcomes.
-    observations = [(112.4, 108.1, .63, 1), (121.2, 115.8, .71, 1), (104.7, 111.0, .46, 0), (118.0, 105.4, .68, 1), (109.3, 117.2, .55, 0), (126.1, 120.5, .74, 1), (98.5, 103.2, .41, 0), (115.6, 113.0, .58, 1)]
+def calibration_summary(rows: list[dict] | None = None, *, minimum_sample: int = 20, demo_example: bool = False) -> CalibrationSummary:
+    if rows is None:
+        try:
+            from .persistence import prediction_rows
+            rows = prediction_rows()
+        except Exception:
+            rows = []
+    observations = [(float(r["predicted_points"]), float(r["actual_points"]), float(r["predicted_probability"]), int(r["actual_outcome"])) for r in rows if r.get("predicted_points") is not None and r.get("actual_points") is not None and r.get("predicted_probability") is not None and r.get("actual_outcome") is not None]
+    if demo_example:
+        observations = [(112.4, 108.1, .63, 1), (121.2, 115.8, .71, 1), (104.7, 111.0, .46, 0), (118.0, 105.4, .68, 1), (109.3, 117.2, .55, 0), (126.1, 120.5, .74, 1), (98.5, 103.2, .41, 0), (115.6, 113.0, .58, 1)]
+    if len(observations) < minimum_sample and not demo_example:
+        return CalibrationSummary(status="UNAVAILABLE", sample_size=len(observations), points_mae=0, points_rmse=0, mean_bias=0, brier_score=0, confidence_bias=0, verdict="Real evaluation unavailable: record predictions before games and outcomes after games before reporting accuracy.", buckets=[], minimum_sample=minimum_sample)
     mae = sum(abs(pred-actual) for pred,actual,_,_ in observations)/len(observations)
+    rmse = (sum((pred-actual)**2 for pred,actual,_,_ in observations)/len(observations))**0.5
+    mean_bias = sum(pred-actual for pred,actual,_,_ in observations)/len(observations)
     brier = sum((prob-outcome)**2 for _,_,prob,outcome in observations)/len(observations)
     bias = sum(prob-outcome for _,_,prob,outcome in observations)/len(observations)
     buckets=[]
@@ -153,25 +162,30 @@ def calibration_summary() -> CalibrationSummary:
         high = .5 if low == 0 else low + .1
         group=[o for o in observations if low <= o[2] < high]
         if group: buckets.append({"predicted":round(sum(o[2] for o in group)/len(group),2),"observed":round(sum(o[3] for o in group)/len(group),2),"count":float(len(group))})
-    verdict = "Slightly over-confident" if bias > .05 else "Slightly under-confident" if bias < -.05 else "Well balanced in this sample"
-    return CalibrationSummary(sample_size=len(observations), points_mae=round(mae,2), brier_score=round(brier,3), confidence_bias=round(bias,3), verdict=verdict, buckets=buckets)
+    verdict = "Demo example, not model performance" if demo_example else "Slightly over-confident" if bias > .05 else "Slightly under-confident" if bias < -.05 else "Well balanced in this sample"
+    return CalibrationSummary(status="DEMO" if demo_example else "AVAILABLE", sample_size=len(observations), points_mae=round(mae,2), points_rmse=round(rmse,2), mean_bias=round(mean_bias,2), brier_score=round(brier,3), confidence_bias=round(bias,3), verdict=verdict, buckets=buckets, minimum_sample=minimum_sample, is_demo=demo_example)
 
 
 def player_research(league: League, player_id: str) -> dict:
     all_players = [p for t in league.teams for p in t.players] + league.free_agents
     player = next((p for p in all_players if p.id == player_id), None)
     if not player: raise ValueError("Player not found")
-    projection = project(player)
-    trend = [round(max(0, player.mean + math.sin(i * 1.7) * player.stdev * .6), 1) for i in range(6)]
-    return {"player": player, "projection": projection, "weekly_trend": trend, "role": "Starter" if player.mean >= 12 else "Rotational / matchup dependent", "market": {"game_total": None, "spread": None, "state": "UNAVAILABLE"}, "explanation": projection.reasons}
+    from .projection_service import DEFAULT_PROJECTION_SERVICE
+    projection = DEFAULT_PROJECTION_SERVICE.project_player(player=player, league=league, week=league.week)
+    return {"player": player, "projection": projection, "weekly_trend": None, "historical_note": "Historical weekly trend unavailable in Phase 1; no synthetic chart is generated.", "role": "Starter" if player.mean >= 12 else "Rotational / matchup dependent", "market": {"game_total": None, "spread": None, "state": "UNAVAILABLE"}, "explanation": projection.reasons}
 
 
 def report_csv(league: League) -> str:
+    from .exporting import export_metadata, safe_csv_value
+    from .simulation import MODEL_VERSION
+
     stream = io.StringIO(); writer = csv.writer(stream)
-    writer.writerow(["Fourth Down weekly report", league.name, f"Week {league.week}"])
+    label = "DEMO DATA" if league.id == "demo" else "SESSION LEAGUE DATA"
+    writer.writerow([safe_csv_value(x) for x in export_metadata(label, league.season, league.week, MODEL_VERSION)])
+    writer.writerow(["Fourth Down weekly report", safe_csv_value(league.name), f"Week {league.week}", label])
     writer.writerow(["Team", "Expected points", "Win probability", "Floor", "Ceiling"])
     for team in league.teams:
         if not team.players: continue
-        result=optimize_lineup(team.players,league.roster_slots)
-        writer.writerow([team.name,result.expected_score,result.win_probability,result.floor,result.ceiling])
+        result=optimize_lineup(team.players,league.roster_slots,league=league)
+        writer.writerow([safe_csv_value(team.name),result.expected_score,result.win_probability,result.floor,result.ceiling])
     return stream.getvalue()

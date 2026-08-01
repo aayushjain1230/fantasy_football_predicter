@@ -1,14 +1,26 @@
-# Architecture and compatibility audit
+# Phase 1 Audit Notes
 
-The repository was empty at the start of this build, so there were no imports, interfaces, models, or tests to preserve or repair. The supplied specification was treated as the source contract.
+Fourth Down Phase 1 focuses on technical credibility for a deployable Streamlit app.
 
-Key architecture decisions:
+Current guarantees:
 
-- One normalized domain model isolates all decision code from ESPN response shapes.
-- Projections store mean and uncertainty; context changes are bounded and traceable instead of unexplained point bonuses.
-- Lineup and waiver decisions share one simulation/projection path.
-- Providers publish explicit freshness states (`LIVE`, `CACHED`, `STALE`, `MOCK`, `UNAVAILABLE`).
-- Secrets are read only by the backend and omitted from serialized models and errors.
-- Missing odds, weather, or props degrades confidence/status rather than producing fabricated live metrics.
+- Demo data is labeled as `DEMO`.
+- Provider states use `LIVE`, `CACHED`, `STALE`, `DEMO`, and `UNAVAILABLE`.
+- Missing odds, weather, player props, nflverse usage, or historical trends are shown as missing or unavailable.
+- The lineup optimizer uses exact legal assignment rather than a sequential greedy choice.
+- Calibration reports real metrics only when enough prediction/outcome pairs exist.
+- Streamlit session state is treated as temporary session state, not authentication or permanent storage.
+- Phase 2 projection artifacts are JSON files loaded from repository-owned paths, not user-supplied pickle/joblib files.
+- Fixture model metrics are labeled as fixture validation, not production accuracy.
+- Phase 3 ADP and draft-intelligence metrics are fixture-only unless a legal production ADP source is configured.
+- Phase 5 primary Streamlit navigation is consolidated around user goals: Home, My Team, Players, League, and Settings. Model, simulation, provider, and methodology details are nested features rather than primary destinations.
 
-Phase 2 engines now reuse the same projection and legal-lineup path as Phase 1. Draft recommendations use value over replacement, scarcity, need, and uncertainty; trades compare whole rosters; power and standings share deterministic season simulations; trust metrics remain read-only. Phase 3 deployment and scheduled notification operations remain optional.
+Explicit non-goals for Phase 1:
+
+- No trained projection model.
+- No production-trained historical projection model.
+- No LLM or OpenAI integration.
+- Phase 4 adds a schedule-aware simulator, Playoff Machine, all-play records, expected wins, and schedule-luck views. Remaining caveats: ambiguous ESPN tiebreakers, reseeding, median-game settings, and multi-week playoff rounds are disclosed as unsupported or conditional instead of treated as exact.
+- No private-league cookie handling in a shared public Streamlit deployment.
+- No permanent multi-user cloud storage.
+- No production ADP refresh or full draft-decision backtest.
