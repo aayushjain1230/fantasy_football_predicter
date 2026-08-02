@@ -8,7 +8,7 @@ Screenshot: after deployment, add a real screenshot of the Streamlit Home or Das
 
 ## Current Status
 
-Phase 1 repaired technical credibility and provides a Streamlit app deployable on Streamlit Community Cloud. Phase 2 adds a reproducible projection-service architecture with position-specific JSON model artifacts trained from a deterministic fixture dataset. Phase 3 adds fixture-backed draft-market intelligence for ADP-relative value, next-pick availability, tiers, and draft-room state. Phase 4 adds schedule-aware league simulation, playoff forecasting, scenario controls, all-play records, and schedule-luck analysis. Phase 5 consolidates those backend systems into a unified in-season decision brief and five primary product destinations. Phase 6 adds centralized configuration, safe artifact validation, operational health summaries, a real prediction-ledger path, safe exports, data-quality checks, benchmark reports, and launch-readiness documentation. Fixture artifacts validate the pipeline and integration; they are not production accuracy claims.
+Phase 1 repaired technical credibility and provides a Streamlit app deployable on Streamlit Community Cloud. Phase 2 adds a reproducible projection-service architecture with position-specific JSON model artifacts trained from a deterministic fixture dataset. Phase 3 adds fixture-backed draft-market intelligence for ADP-relative value, next-pick availability, tiers, and draft-room state. Phase 4 adds schedule-aware league simulation, playoff forecasting, scenario controls, all-play records, and schedule-luck analysis. Phase 5 consolidates those backend systems into a unified in-season decision brief and five primary product destinations. Phase 6 adds centralized configuration, safe artifact validation, operational health summaries, a real prediction-ledger path, safe exports, data-quality checks, benchmark reports, and launch-readiness documentation. The current BoringFantasyBot-inspired extension adds optional market-context models, identity resolution, recommendation previews, and a local decision journal without copying arbitrary betting scores or automated transaction behavior. Fixture artifacts validate the pipeline and integration; they are not production accuracy claims.
 
 Implemented and verified:
 
@@ -17,7 +17,7 @@ Implemented and verified:
 - Public ESPN league connection when ESPN permits public access
 - ESPN roster, lineup-slot, scoring, team, and free-agent normalization
 - Exact legal lineup optimization with unique-player constraints
-- Safe, Balanced, and Upside lineup objectives
+- Conservative, Balanced, and Aggressive lineup objectives
 - Waiver add/drop analysis based on full legal lineup impact
 - Trade analyzer with before/after legal roster impact and required-drop handling
 - Draft assistant using value over replacement, positional scarcity, roster need, and heuristic risk
@@ -28,13 +28,17 @@ Implemented and verified:
 - Players workspace with projection, market/draft, history, and model-detail sections
 - League workspace with outlook, standings, scenarios, power, schedule luck, and team detail sections
 - Schedule-aware League Outlook using normalized remaining matchups when available
-- Playoff Machine with session-local deterministic outcome constraints
+- League scenario controls with session-local deterministic outcome constraints
 - Monte Carlo playoff, seed, bye, and championship estimates
 - Projected final standings with Monte Carlo standard error
 - Team score distributions from legal optimized lineups
 - All-play records, expected wins, schedule luck, points-against luck, and remaining schedule strength
 - Power rankings separated into team strength, resume, and future outlook
 - Provider status table with live/cached/stale/demo/unavailable labels
+- Optional market-context provider interface with consensus calculations, unavailable fallback, and no fabricated betting lines
+- Canonical player identity resolution with ambiguity detection
+- Recommendation preview workflow with explicit unsupported execution status
+- Local decision journal with hashed league identifiers and retrospective regret helpers
 - Settings workspace with connection, provider status, methodology, privacy, and evaluation details
 - Centralized configuration with required/optional/secret/local-only classifications
 - Projection artifact validation with labeled fallback behavior
@@ -50,6 +54,8 @@ Experimental or heuristic:
 - Phase 3 fixture-trained draft intelligence artifacts
 - Trade value-balance score
 - Draft availability-at-next-pick score
+- Market adjustment layer is disabled unless explicitly enabled and remains bounded/provenance-labeled
+- Decision journal persistence is local SQLite/ephemeral on Streamlit Cloud, not permanent multi-user storage
 - Phase 4 simulation correlation structure and team-score intervals
 - Rest-of-season projections use week-specific projection-service calls, but future opponent and bye context are still labeled missing until integrated
 - ESPN tiebreaker, reseeding, median-game, and multi-week playoff support when raw settings are ambiguous
@@ -125,7 +131,7 @@ Private ESPN leagues:
 - Public users should not paste ESPN cookies into the Streamlit UI
 - Cookies are never displayed by the app and should never be committed
 
-## Data Sources
+## Provider Table
 
 | Provider | State Meaning | Used By | Unavailable Behavior |
 |---|---|---|---|
@@ -147,6 +153,9 @@ Projection system:
 - Falls back to the Phase 1 projection-adjustment engine for K, DST, missing artifacts, corrupt artifacts, or incompatible model versions
 - Reports baseline source, baseline value, model version, training cutoff, important inputs, final value, missing inputs, reasons, limitations, and uncertainty method
 - Does not load user-supplied pickle/joblib artifacts
+- Preserves baseline projection, market adjustment, and final projection as separate fields
+- Market data is optional; if unavailable, the projection remains baseline-driven and lists market context as missing
+- The conservative market-adjustment layer is bounded, transparent, and disabled by default unless explicitly evaluated/enabled
 
 Phase 2 prediction definition:
 
@@ -168,9 +177,10 @@ Lineup optimizer:
 
 Lineup objectives:
 
-- Safe: adjusted projection minus a variance penalty
-- Balanced: adjusted expected projection
-- Upside: adjusted projection plus a variance reward
+- Conservative: prioritizes the highest projected floor and reduces downside risk
+- Balanced: maximizes adjusted expected fantasy points
+- Aggressive: prioritizes ceiling and matchup-aware chance of beating the opponent
+- Streamlit shows lineup recommendations as previews only; it does not submit ESPN transactions
 
 League simulations:
 
@@ -311,6 +321,7 @@ Streamlit calls Python service functions directly. It does not start FastAPI as 
 - No player prop source is integrated
 - Calibration metrics are unavailable until enough real predictions and outcomes are stored
 - Prediction-ledger evaluation remains unavailable until real pre-outcome predictions are recorded and matched to outcomes
+- Decision-journal regret compares recommendations only against alternatives that were valid at decision time
 - ESPN playoff tiebreakers, reseeding, median games, and multi-week playoff rounds are conditional when raw settings are unavailable or ambiguous
 - Current live partial scoring is not mixed with full projections; current-week simulation is pregame-only unless final
 - Player/team correlation modeling remains limited and is labeled as heuristic

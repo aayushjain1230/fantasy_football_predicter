@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from datetime import UTC, datetime
 
 from .domain import League, LineupEntry, LineupResult, Player, Projection, WaiverMove
 from .projection_service import DEFAULT_PROJECTION_SERVICE, ProjectionService
@@ -49,7 +50,8 @@ def project(player: Player, market_factor: float | None = None, context_factor: 
     ]
     reasons = ["Baseline projection is adjusted only by bounded context", "Availability is applied directly to expected output",*live_reasons]
     if player.injury_status != "HEALTHY": reasons.append(f"{player.injury_status.title()} status lowers availability and raises uncertainty")
-    return Projection(player_id=player.id, baseline_source="ESPN weekly projection or demo fixture baseline", baseline_value=round(player.mean,2), mean=round(mean, 2), median=round(mean, 2), floor=round(max(0, mean - 1.28 * sd), 2), ceiling=round(mean + 1.28 * sd, 2), confidence=round(max(.35, .82 - .08 * len(absent)), 2), adjustments=adjustments, reasons=reasons, missing=absent, limitations=["This is an explainable projection-adjustment engine, not a trained machine-learning projection model.", "Uncertainty ranges are heuristic and not empirically calibrated in Phase 1."])
+    final = round(mean, 2)
+    return Projection(player_id=player.id, baseline_source="ESPN weekly projection or demo fixture baseline", baseline_value=round(player.mean,2), baseline_projection=round(player.mean, 2), market_adjustment=0, final_projection=final, mean=final, median=final, floor=round(max(0, mean - 1.28 * sd), 2), ceiling=round(mean + 1.28 * sd, 2), confidence=round(max(.35, .82 - .08 * len(absent)), 2), adjustments=adjustments, reasons=reasons, missing=absent, limitations=["This is an explainable projection-adjustment engine, not a trained machine-learning projection model.", "Uncertainty ranges are heuristic and not empirically calibrated in Phase 1."], generated_at=datetime.now(UTC).isoformat())
 
 
 def _eligible(player: Player, slot: str) -> bool:
@@ -62,17 +64,35 @@ def _eligible(player: Player, slot: str) -> bool:
     return slot in player.eligible_slots
 
 
-def optimize_lineup(players: list[Player], slots: list[str], *, style: str = "balanced", opponent_mean: float = 112, seed: int = 7, league: League | None = None, projection_service: ProjectionService | None = None) -> LineupResult:
-    if style not in {"safe", "balanced", "upside"}:
-        raise ValueError("style must be safe, balanced, or upside")
+def _style_key(style: str) -> str:
+    aliases = {
+        "safe": "conservative",
+        "conservative": "conservative",
+        "balanced": "balanced",
+        "medium": "balanced",
+        "upside": "aggressive",
+        "aggressive": "aggressive",
+    }
+    key = aliases.get(style.strip().lower())
+    if not key:
+        raise ValueError("style must be Conservative, Balanced, or Aggressive")
+    return key
+
+
+def optimize_lineup(players: list[Player], slots: list[str], *, style: str = "balanced", opponent_mean: float = 112, seed: int = 7, league: League | None = None, projection_service: ProjectionService | None = None, locked_player_ids: set[str] | None = None) -> LineupResult:
+    requested_style = style
+    style = _style_key(style)
+    locked_player_ids = locked_player_ids or set()
     service = projection_service or DEFAULT_PROJECTION_SERVICE
     projections = {player.id: service.project_player(player=player, league=league, week=league.week if league else None) for player in players}
     def objective(player: Player) -> float:
         projection = projections[player.id]
-        if style == "safe":
-            return projection.mean - 0.28 * player.stdev
-        if style == "upside":
-            return projection.mean + 0.28 * player.stdev
+        if style == "conservative":
+            return projection.floor
+        if style == "aggressive":
+            ceiling_gap = max(0, projection.ceiling - projection.mean)
+            matchup_need = max(0.15, min(0.6, (opponent_mean - projection.mean) / max(1, opponent_mean)))
+            return projection.mean + matchup_need * ceiling_gap
         return projection.mean
 
     ordered_slots = sorted(enumerate(slots), key=lambda item: (sum(1 for p in players if _eligible(p, item[1])), item[1], item[0]))
@@ -86,6 +106,8 @@ def optimize_lineup(players: list[Player], slots: list[str], *, style: str = "ba
     def search(slot_index: int, used: set[str], score: float, assignment: list[tuple[int, str, Player]]) -> None:
         nonlocal best_score, best_assignment
         if slot_index == len(ordered_slots):
+            if locked_player_ids and not locked_player_ids.issubset(used):
+                return
             if best_score is None or score > best_score:
                 best_score = score
                 best_assignment = assignment[:]
@@ -93,6 +115,12 @@ def optimize_lineup(players: list[Player], slots: list[str], *, style: str = "ba
         original_index, slot = ordered_slots[slot_index]
         if len((suffix_capacity[slot_index] - used)) < len(ordered_slots) - slot_index:
             return
+        remaining_locked = locked_player_ids - used
+        remaining_slots = [slot_name for _, slot_name in ordered_slots[slot_index:]]
+        for locked_id in remaining_locked:
+            locked_player = next((p for p in players if p.id == locked_id), None)
+            if locked_player is None or not any(_eligible(locked_player, slot_name) for slot_name in remaining_slots):
+                return
         eligible = [p for p in players if p.id not in used and _eligible(p, slot)]
         for player in sorted(eligible, key=objective, reverse=True):
             used.add(player.id)
@@ -118,10 +146,11 @@ def optimize_lineup(players: list[Player], slots: list[str], *, style: str = "ba
         score = sum(max(0, rng.gauss(e.projection.mean, e.player.stdev)) for e in entries)
         wins += score > max(0, rng.gauss(opponent_mean, 15))
     complete=len(entries)==len(slots)
-    explanation={"safe":"Maximizes adjusted projection minus a variance penalty.","balanced":"Maximizes adjusted expected projection.","upside":"Maximizes adjusted projection plus a variance reward."}[style]
+    explanation={"conservative":"Prioritizes the highest projected floor and reduces downside risk.","balanced":"Maximizes expected fantasy points.","aggressive":"Prioritizes ceiling and matchup-aware chance of catching or beating the opponent."}[style]
     if not complete:
         explanation += " A complete legal lineup could not be formed from available eligible players."
-    return LineupResult(style=style, starters=entries, bench=remaining, expected_score=round(sum(means), 1), floor=round(floor, 1), ceiling=round(ceiling, 1), win_probability=round(wins / 2500, 3) if entries else 0, changes=[f"Start {e.player.name} in {e.slot}" for e in entries if e.player.injury_status != "HEALTHY"], is_complete=complete, missing_slots=missing_slots, explanation=explanation)
+    display_style = {"safe": "safe", "upside": "upside"}.get(requested_style.strip().lower(), style)
+    return LineupResult(style=display_style, starters=entries, bench=remaining, expected_score=round(sum(means), 1), floor=round(floor, 1), ceiling=round(ceiling, 1), win_probability=round(wins / 2500, 3) if entries else 0, changes=[f"Start {e.player.name} in {e.slot}" for e in entries if e.player.injury_status != "HEALTHY"], is_complete=complete, missing_slots=missing_slots, explanation=explanation)
 
 
 def waiver_moves(league: League) -> list[WaiverMove]:

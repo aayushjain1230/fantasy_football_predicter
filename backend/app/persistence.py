@@ -60,6 +60,14 @@ def connection() -> Iterator[sqlite3.Connection]:
             evaluation_status TEXT NOT NULL, error REAL,
             FOREIGN KEY(prediction_id) REFERENCES prediction_ledger(prediction_id)
         );
+        CREATE TABLE IF NOT EXISTS decision_journal (
+            decision_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, season INTEGER NOT NULL,
+            week INTEGER NOT NULL, league_id_hash TEXT NOT NULL, decision_type TEXT NOT NULL,
+            model_version TEXT NOT NULL, data_snapshot_id TEXT NOT NULL, recommendation TEXT NOT NULL,
+            alternatives TEXT NOT NULL, expected_points REAL, floor REAL, ceiling REAL,
+            confidence TEXT NOT NULL, explanation TEXT NOT NULL, user_action TEXT NOT NULL,
+            execution_status TEXT NOT NULL, actual_outcome TEXT, evaluated_at TEXT
+        );
         """)
         db.commit()
         yield db
@@ -180,7 +188,61 @@ def prediction_ledger_rows() -> list[dict]:
         values.append(item)
     return values
 
+
+def save_decision_journal_entry(row: dict) -> None:
+    with connection() as db:
+        db.execute(
+            """
+            INSERT INTO decision_journal(
+                decision_id,created_at,season,week,league_id_hash,decision_type,model_version,
+                data_snapshot_id,recommendation,alternatives,expected_points,floor,ceiling,
+                confidence,explanation,user_action,execution_status,actual_outcome,evaluated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(decision_id) DO UPDATE SET
+                user_action=excluded.user_action,
+                execution_status=excluded.execution_status,
+                actual_outcome=excluded.actual_outcome,
+                evaluated_at=excluded.evaluated_at
+            """,
+            (
+                row["decision_id"],
+                row["created_at"],
+                row["season"],
+                row["week"],
+                row["league_id_hash"],
+                row["decision_type"],
+                row["model_version"],
+                row["data_snapshot_id"],
+                json.dumps(row["recommendation"]),
+                json.dumps(row["alternatives"]),
+                row.get("expected_points"),
+                row.get("floor"),
+                row.get("ceiling"),
+                row["confidence"],
+                json.dumps(row["explanation"]),
+                row.get("user_action", "not_recorded"),
+                row.get("execution_status", "Recommendation only"),
+                json.dumps(row.get("actual_outcome")) if row.get("actual_outcome") is not None else None,
+                row.get("evaluated_at"),
+            ),
+        )
+        db.commit()
+
+
+def decision_journal_rows() -> list[dict]:
+    with connection() as db:
+        rows = db.execute("SELECT * FROM decision_journal ORDER BY created_at DESC").fetchall()
+    results = []
+    for row in rows:
+        item = dict(row)
+        item["recommendation"] = json.loads(item["recommendation"])
+        item["alternatives"] = json.loads(item["alternatives"])
+        item["explanation"] = json.loads(item["explanation"])
+        item["actual_outcome"] = json.loads(item["actual_outcome"]) if item.get("actual_outcome") else None
+        results.append(item)
+    return results
+
 def delete_all_user_data() -> None:
     with connection() as db:
-        for table in ("app_state","provider_cache","predictions","draft_state","prediction_outcomes","prediction_ledger"): db.execute(f"DELETE FROM {table}")
+        for table in ("app_state","provider_cache","predictions","draft_state","prediction_outcomes","prediction_ledger","decision_journal"): db.execute(f"DELETE FROM {table}")
         db.commit()

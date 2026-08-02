@@ -1,4 +1,4 @@
-# Data Sources and Degradation
+# Provider Freshness and Degradation
 
 | Failure | Expected behavior |
 |---|---|

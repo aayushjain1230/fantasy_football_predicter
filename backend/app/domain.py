@@ -12,6 +12,15 @@ class DataState(StrEnum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
+class ProviderReliabilityState(StrEnum):
+    FRESH = "Fresh"
+    STALE = "Stale"
+    UNAVAILABLE = "Unavailable"
+    PARTIAL = "Partial"
+    RATE_LIMITED = "Rate limited"
+    AUTH_REQUIRED = "Authentication required"
+
+
 class Player(BaseModel):
     id: str
     name: str
@@ -90,6 +99,9 @@ class Projection(BaseModel):
     week: int | None = None
     baseline_source: str = "Input projection"
     baseline_value: float = 0
+    baseline_projection: float | None = None
+    market_adjustment: float = 0
+    final_projection: float | None = None
     mean: float
     floor: float
     median: float
@@ -109,6 +121,20 @@ class Projection(BaseModel):
     reasons: list[str]
     missing: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    market_data_available: bool = False
+    market_data_quality: str = "unavailable"
+    generated_at: str | None = None
+
+
+class ProviderReliability(BaseModel):
+    provider: str
+    status: ProviderReliabilityState
+    retrieved_at: str | None = None
+    freshness: str = "unknown"
+    is_stale: bool = False
+    error_code: str | None = None
+    fallback_used: bool = False
+    message: str = ""
 
 
 class LineupEntry(BaseModel):

@@ -29,6 +29,7 @@ SETTINGS_REGISTRY = [
     SettingInfo("MAX_REQUEST_BYTES", "Public", cloud_safe=True),
     SettingInfo("ALLOWED_ORIGINS", "Public", cloud_safe=True),
     SettingInfo("ODDS_API_KEY", "Optional secret", secret=True, cloud_safe=True),
+    SettingInfo("ENABLE_MARKET_ADJUSTMENTS", "Public", cloud_safe=True),
     SettingInfo("OPENWEATHER_API_KEY", "Optional secret", secret=True, cloud_safe=True),
     SettingInfo("DIGEST_WEBHOOK_URL", "Optional secret", secret=True, cloud_safe=True),
     SettingInfo("ESPN_S2", "Local-only secret", secret=True, local_only=True, cloud_safe=False),
@@ -47,6 +48,7 @@ class AppConfig:
     max_request_bytes: int = 1_048_576
     allowed_origins: tuple[str, ...] = ("http://localhost:3000", "http://127.0.0.1:3000")
     odds_api_key: str | None = None
+    enable_market_adjustments: bool = False
     openweather_api_key: str | None = None
     digest_webhook_url: str | None = None
     espn_s2: str | None = None
@@ -92,6 +94,7 @@ def load_config(overrides: Mapping[str, str] | None = None) -> AppConfig:
         max_request_bytes=_int(values.get("MAX_REQUEST_BYTES"), 1_048_576, 16_384, 8_388_608),
         allowed_origins=origins or ("http://localhost:3000", "http://127.0.0.1:3000"),
         odds_api_key=values.get("ODDS_API_KEY") or None,
+        enable_market_adjustments=_bool(values.get("ENABLE_MARKET_ADJUSTMENTS"), False),
         openweather_api_key=values.get("OPENWEATHER_API_KEY") or None,
         digest_webhook_url=values.get("DIGEST_WEBHOOK_URL") or None,
         espn_s2=values.get("ESPN_S2") or None,
@@ -123,6 +126,7 @@ def config_summary(config: AppConfig | None = None) -> list[dict[str, object]]:
         "MAX_REQUEST_BYTES": config.max_request_bytes,
         "ALLOWED_ORIGINS": len(config.allowed_origins),
         "ODDS_API_KEY": bool(config.odds_api_key),
+        "ENABLE_MARKET_ADJUSTMENTS": config.enable_market_adjustments,
         "OPENWEATHER_API_KEY": bool(config.openweather_api_key),
         "DIGEST_WEBHOOK_URL": bool(config.digest_webhook_url),
         "ESPN_S2": bool(config.espn_s2),

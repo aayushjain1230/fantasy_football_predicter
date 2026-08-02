@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
@@ -17,7 +18,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-OPTIONAL_SECRET_KEYS = ("ODDS_API_KEY", "OPENWEATHER_API_KEY", "DIGEST_WEBHOOK_URL")
+OPTIONAL_SECRET_KEYS = ("ODDS_API_KEY", "OPENWEATHER_API_KEY", "DIGEST_WEBHOOK_URL", "ENABLE_MARKET_ADJUSTMENTS")
 
 try:
     from dotenv import load_dotenv
@@ -50,14 +51,37 @@ from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSettings, snake_n
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
 from app.providers import connect_espn, statuses  # noqa: E402
 from app.decision_service import build_weekly_brief, roster_outlook, value_based_faab  # noqa: E402
+from app.decision_journal import create_decision_entry  # noqa: E402
 from app.config import APP_VERSION, CONFIG, config_summary, validate_config  # noqa: E402
 from app.evaluation import evaluate_prediction_ledger  # noqa: E402
+from app.identity import build_identity_index, resolve_player_identity  # noqa: E402
+from app.market import default_market_provider  # noqa: E402
 from app.operations import DEGRADATION_MATRIX, PERFORMANCE_BUDGETS, health_summary  # noqa: E402
+from app.persistence import decision_journal_rows, save_decision_journal_entry  # noqa: E402
+from app.recommendations import generate_recommendation, require_confirmation, validate_recommendation  # noqa: E402
 from app.simulation import (  # noqa: E402
     ScenarioConstraint,
     league_fingerprint,
     simulate_league,
 )
+from ui.components import (  # noqa: E402
+    action_card,
+    badge,
+    confidence_badge,
+    empty_state,
+    freshness_badge,
+    metric_card,
+    metric_grid,
+    page_header,
+    player_card,
+    section_header,
+    stadium_hero,
+    warning_state,
+)
+from ui.formatting import fantasy_points as fmt_points  # noqa: E402
+from ui.formatting import h, percentage as fmt_pct, percentage_points  # noqa: E402
+from ui.navigation import render_navigation  # noqa: E402
+from ui.styles import inject_global_styles  # noqa: E402
 
 
 LEAGUE_RE = re.compile(r"^(demo|[0-9]{1,30})$")
@@ -78,6 +102,8 @@ def ensure_state() -> None:
     load_safe_config()
     if "league" not in st.session_state:
         st.session_state.league = demo_league()
+    if "league_connected" not in st.session_state:
+        st.session_state.league_connected = False
     if "mode" not in st.session_state:
         st.session_state.mode = "demo"
     if "draft_picks" not in st.session_state:
@@ -92,6 +118,10 @@ def ensure_state() -> None:
         st.session_state.playoff_scenarios = []
     if "playoff_scenario_history" not in st.session_state:
         st.session_state.playoff_scenario_history = []
+    if "last_manual_refresh" not in st.session_state:
+        st.session_state.last_manual_refresh = None
+    if "last_manual_refresh_epoch" not in st.session_state:
+        st.session_state.last_manual_refresh_epoch = 0.0
 
 
 def league_label(league) -> str:
@@ -107,15 +137,7 @@ def delta(value: float, suffix: str = "") -> str:
 
 
 def status_badge(state: str) -> str:
-    colors = {
-        "LIVE": "#16a34a",
-        "CACHED": "#2563eb",
-        "STALE": "#ca8a04",
-        "DEMO": "#7c3aed",
-        "UNAVAILABLE": "#64748b",
-    }
-    color = colors.get(str(state), "#64748b")
-    return f'<span class="badge" style="background:{color};">{state}</span>'
+    return badge(str(state), str(state))
 
 
 def player_label(player) -> str:
@@ -124,17 +146,7 @@ def player_label(player) -> str:
 
 
 def render_shell_style() -> None:
-    st.markdown(
-        """
-        <style>
-        .block-container {max-width: 1220px; padding-top: 1.6rem;}
-        .badge {color: white; border-radius: 999px; padding: 0.18rem 0.55rem; font-size: 0.72rem; font-weight: 700;}
-        .note {border: 1px solid #334155; border-radius: 6px; padding: 0.8rem 1rem; background: rgba(15,23,42,.36);}
-        .small {color: #94a3b8; font-size: .88rem;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    inject_global_styles()
 
 
 def table_players(players: Iterable) -> list[dict]:
@@ -166,6 +178,24 @@ def table_lineup(result) -> list[dict]:
         }
         for e in result.starters
     ]
+
+
+def lineup_diff_rows(current, recommended) -> list[dict]:
+    current_by_slot = {entry.slot: entry for entry in current.starters}
+    rows = []
+    for entry in recommended.starters:
+        old = current_by_slot.get(entry.slot)
+        rows.append(
+            {
+                "Slot": entry.slot,
+                "Current Starter": old.player.name if old else "Empty",
+                "Recommended Starter": entry.player.name,
+                "Expected Diff": round(entry.projection.mean - (old.projection.mean if old else 0), 1),
+                "Floor Diff": round(entry.projection.floor - (old.projection.floor if old else 0), 1),
+                "Ceiling Diff": round(entry.projection.ceiling - (old.projection.ceiling if old else 0), 1),
+            }
+        )
+    return rows
 
 
 def get_league_simulation(league, simulations: int = 1000, seed: int = 41, scenarios: list[dict] | None = None):
@@ -226,32 +256,51 @@ def connect_error(exc: Exception) -> str:
 
 
 def page_home(league) -> None:
-    st.title("Fourth Down")
-    st.caption("Your weekly fantasy football command center.")
-    st.markdown(f'{status_badge(league_label(league))}', unsafe_allow_html=True)
+    if not st.session_state.get("league_connected"):
+        stadium_hero()
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Connect ESPN League", type="primary", use_container_width=True):
+                st.session_state.pending_page = "Settings"
+                st.rerun()
+        with c2:
+            if st.button("Try Demo League", use_container_width=True):
+                st.session_state.league = demo_league()
+                st.session_state.mode = "demo"
+                st.session_state.league_connected = True
+                st.rerun()
+        warning_state(
+            "Private leagues are local-only",
+            "Fourth Down is read-only. Public ESPN leagues can connect from Streamlit; private ESPN cookies should not be entered into a public app.",
+        )
+        return
+
+    page_header(
+        "Weekly Command Center",
+        "Home",
+        f"{league.name} | Week {league.week} | {league_label(league)}",
+        [status_badge(league_label(league))],
+    )
     brief = build_weekly_brief(league)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Matchup", brief.matchup_summary)
-    c2.metric("Expected Score", f"{brief.expected_score:.1f}")
-    c3.metric("Win Estimate", pct(brief.win_probability))
-    c4.metric("Playoff Outlook", pct(brief.playoff_probability or 0))
-    st.subheader("What To Do First")
+    metric_grid(
+        [
+            metric_card("Projected Points", fmt_points(brief.expected_score), "Current optimal lineup", "green"),
+            metric_card("Win Estimate", fmt_pct(brief.win_probability), brief.matchup_summary, "blue"),
+            metric_card("Playoff Odds", fmt_pct(brief.playoff_probability), "Schedule-aware estimate", "purple"),
+            metric_card("Best Position", brief.best_position or "Unknown", "Roster strength", "gold"),
+        ]
+    )
+    section_header("What To Do First", "Ranked by urgency, expected impact, confidence, and deadline.")
     for action in brief.top_actions[:4]:
-        with st.container(border=True):
-            cols = st.columns([1.2, 2.5, 1, 1])
-            cols[0].markdown(f"**{action.priority}**")
-            cols[1].markdown(f"**{action.recommended_action}**")
-            cols[2].metric("Impact", delta(action.expected_points_change, " pts") if action.expected_points_change is not None else "Context")
-            cols[3].metric("Confidence", action.confidence)
-            st.caption(action.title)
-            with st.expander("Why?"):
-                for item in action.reasons:
-                    st.write(f"- {item}")
-                if action.risks:
-                    st.write(f"Main risk: {action.risks[0]}")
-                if action.missing_inputs:
-                    st.write("Missing inputs:", ", ".join(action.missing_inputs))
-    st.markdown(f'<div class="note">{brief.roster_summary} Session state can reset when Streamlit reconnects.</div>', unsafe_allow_html=True)
+        action_card(action)
+        with st.expander(f"Why: {action.title}"):
+            for item in action.reasons:
+                st.write(f"- {item}")
+            if action.risks:
+                st.write(f"Main risk: {action.risks[0]}")
+            if action.missing_inputs:
+                st.write("Missing inputs:", ", ".join(action.missing_inputs))
+    empty_state("Roster summary", f"{brief.roster_summary} Session state can reset when Streamlit reconnects.")
 
 
 def page_connect() -> None:
@@ -276,6 +325,7 @@ def page_connect() -> None:
                 league = asyncio.run(connect_espn(league_id, int(season), team_id or None))
             st.session_state.league = league
             st.session_state.mode = "demo" if league.id == "demo" else "live"
+            st.session_state.league_connected = True
             st.session_state.draft_picks = []
             st.session_state.playoff_scenarios = []
             st.session_state.playoff_scenario_history = []
@@ -286,6 +336,7 @@ def page_connect() -> None:
     if st.button("Reset to demo mode"):
         st.session_state.league = demo_league()
         st.session_state.mode = "demo"
+        st.session_state.league_connected = False
         st.session_state.draft_picks = []
         st.session_state.playoff_scenarios = []
         st.session_state.playoff_scenario_history = []
@@ -311,12 +362,62 @@ def page_dashboard(league) -> None:
 
 
 def page_lineup(league) -> None:
-    st.header("Lineup Optimizer")
-    st.write("Safe penalizes variance, Balanced maximizes expected adjusted points, and Upside rewards variance.")
+    section_header("Lineup", "Compare meaningful Conservative, Balanced, and Aggressive starter sets.")
+    st.write("Conservative prioritizes floor, Balanced maximizes expected fantasy points, and Aggressive weights ceiling against the current matchup.")
     team = user_team(league)
-    for style in ("safe", "balanced", "upside"):
-        result = optimize_lineup(team.players, league.roster_slots, style=style)
-        with st.expander(style.title(), expanded=style == "balanced"):
+    baseline = optimize_lineup(team.players, league.roster_slots, style="Balanced", league=league)
+    selected_style = st.radio("Risk mode", ["Conservative", "Balanced", "Aggressive"], index=1, horizontal=True)
+    result = optimize_lineup(team.players, league.roster_slots, style=selected_style, league=league)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Expected", f"{result.expected_score:.1f}", delta(result.expected_score - baseline.expected_score, " pts"))
+    c2.metric("Floor", f"{result.floor:.1f}", delta(result.floor - baseline.floor, " pts"))
+    c3.metric("Ceiling", f"{result.ceiling:.1f}", delta(result.ceiling - baseline.ceiling, " pts"))
+    c4.metric("Win Estimate", pct(result.win_probability), percentage_points(result.win_probability - baseline.win_probability))
+    st.caption(result.explanation)
+    st.dataframe(table_lineup(result), hide_index=True, use_container_width=True)
+    if result.missing_slots:
+        st.warning(f"Missing slots: {', '.join(result.missing_slots)}")
+    with st.expander("Preview recommended changes"):
+        st.dataframe(lineup_diff_rows(baseline, result), hide_index=True, use_container_width=True)
+        preview = validate_recommendation(
+            generate_recommendation(
+                "Lineup optimization",
+                {"style": "Balanced", "expected_points": baseline.expected_score, "floor": baseline.floor, "ceiling": baseline.ceiling},
+                {"style": selected_style, "expected_points": result.expected_score, "floor": result.floor, "ceiling": result.ceiling},
+                expected_points_difference=round(result.expected_score - baseline.expected_score, 1),
+                floor_difference=round(result.floor - baseline.floor, 1),
+                ceiling_difference=round(result.ceiling - baseline.ceiling, 1),
+                win_probability_difference=round(result.win_probability - baseline.win_probability, 3),
+                reasons=[result.explanation],
+                confidence="Medium",
+                data_freshness=[league_label(league)],
+            )
+        )
+        preview = require_confirmation(preview, supported_execution=False)
+        st.info(f"Preview status: {preview.status}. Streamlit does not submit lineup changes.")
+        if st.button("Record this recommendation", use_container_width=True):
+            entry = create_decision_entry(
+                season=league.season,
+                week=league.week,
+                league_id=league.id,
+                decision_type="Lineup optimization",
+                model_version=result.starters[0].projection.model_version if result.starters else "unavailable",
+                data_snapshot_id=league_fingerprint(league),
+                recommendation={"style": selected_style, "expected_points": result.expected_score},
+                alternatives=[{"style": "Balanced", "expected_points": baseline.expected_score}],
+                expected_points=result.expected_score,
+                floor=result.floor,
+                ceiling=result.ceiling,
+                confidence=preview.confidence,
+                explanation=preview.reasons,
+                execution_status=str(preview.status),
+            )
+            save_decision_journal_entry(entry.to_row())
+            st.success("Recommendation recorded locally. No ESPN transaction was submitted.")
+    st.subheader("All Risk Modes")
+    for style in ("Conservative", "Balanced", "Aggressive"):
+        result = optimize_lineup(team.players, league.roster_slots, style=style, league=league)
+        with st.expander(style, expanded=style == selected_style):
             c1, c2, c3 = st.columns(3)
             c1.metric("Expected", f"{result.expected_score:.1f}")
             c2.metric("Win Estimate", pct(result.win_probability))
@@ -328,7 +429,7 @@ def page_lineup(league) -> None:
 
 
 def page_waivers(league) -> None:
-    st.header("Waiver Analysis")
+    section_header("Waivers", "Add/drop recommendations with roster impact, drop safety, and value-based FAAB.")
     moves = waiver_moves(league)
     if not moves:
         st.info("No positive legal add/drop move is currently modeled.")
@@ -363,7 +464,7 @@ def page_waivers(league) -> None:
 
 
 def page_trades(league) -> None:
-    st.header("Trade Analyzer")
+    section_header("Trades", "Evaluate full-roster trade impact, value balance, and required drops.")
     team = user_team(league)
     opponents = [t for t in league.teams if t.id != team.id]
     if not opponents:
@@ -440,12 +541,16 @@ def page_draft(league) -> None:
 
 def draft_settings_from_state(league) -> DraftSettings:
     league_size = max(2, len(league.teams) or 12)
-    next_pick = snake_next_pick(int(st.session_state.current_pick), int(st.session_state.draft_slot), league_size)
-    return DraftSettings(league_size=league_size, current_pick=int(st.session_state.current_pick), next_pick=next_pick)
+    current_pick = max(1, int(st.session_state.current_pick))
+    draft_slot = min(max(1, int(st.session_state.draft_slot)), league_size)
+    st.session_state.current_pick = current_pick
+    st.session_state.draft_slot = draft_slot
+    next_pick = snake_next_pick(current_pick, draft_slot, league_size)
+    return DraftSettings(league_size=league_size, current_pick=current_pick, next_pick=next_pick)
 
 
 def page_draft_intelligence(league) -> None:
-    st.header("Draft Intelligence")
+    section_header("Draft Board", "Contextual draft recommendations and ADP-relative value.")
     settings = draft_settings_from_state(league)
     drafted = {pick["player_id"] for pick in st.session_state.draft_picks}
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted)
@@ -489,7 +594,7 @@ def page_draft_intelligence(league) -> None:
 
 
 def page_draft_room(league) -> None:
-    st.header("Draft Room")
+    section_header("Live Draft State", "Session-local pick tracking and next-pick context.")
     league_size = max(2, len(league.teams) or 12)
     st.session_state.draft_slot = st.number_input("Your draft slot", min_value=1, max_value=league_size, value=int(st.session_state.draft_slot), step=1)
     st.session_state.current_pick = st.number_input("Current overall pick", min_value=1, max_value=300, value=int(st.session_state.current_pick), step=1)
@@ -532,7 +637,7 @@ def page_historical_draft_explorer() -> None:
 
 
 def page_draft_model_performance() -> None:
-    st.header("Draft Model Performance")
+    section_header("Draft Evaluation", "Fixture evaluation only; not production accuracy.")
     path = ROOT / "models" / "draft" / "latest" / "evaluation.json"
     card = ROOT / "docs" / "DRAFT_MODEL_CARD.md"
     if path.exists():
@@ -553,7 +658,7 @@ def page_market_movement() -> None:
 
 
 def page_player_research(league) -> None:
-    st.header("Player Research")
+    section_header("Player Detail", "Projection provenance, missing inputs, and player-specific context.")
     players = [p for t in league.teams for p in t.players] + league.free_agents
     selected = st.selectbox("Player", players, format_func=player_label)
     data = player_research(league, selected.id)
@@ -673,7 +778,7 @@ def page_standings(league) -> None:
 
 
 def page_playoff_machine(league) -> None:
-    st.header("Playoff Machine")
+    section_header("Playoff Scenarios", "Lock remaining matchup outcomes and compare conditional playoff outlooks.")
     st.caption("Lock deterministic outcomes for unresolved matchups. Scenario state is stored only in this Streamlit session.")
     future = [m for m in league.schedule if not m.is_complete and m.period <= league.rules.regular_season_end]
     team_names = {team.id: team.name for team in league.teams}
@@ -735,7 +840,7 @@ def page_playoff_machine(league) -> None:
 
 
 def page_schedule_analysis(league) -> None:
-    st.header("Schedule Analysis")
+    section_header("Schedule Context", "All-play record, expected wins, schedule luck, and opponent strength.")
     result = get_league_simulation(league, simulations=1000, seed=61)
     st.caption("Schedule luck is defined as actual wins minus all-play expected wins. This is descriptive, not proof of manager skill or causation.")
     st.dataframe(
@@ -808,10 +913,10 @@ def page_simulation_methodology(league) -> None:
 
 
 def page_my_team(league) -> None:
-    st.header("My Team")
+    page_header("My Team", "Roster Decisions", "Lineup, waivers, trades, roster outlook, and contingency planning in one workspace.", [status_badge(league_label(league))])
     brief = build_weekly_brief(league)
     st.caption("Roster decisions, not separate labs. Technical detail is available inside each feature.")
-    st.subheader("Priority Actions")
+    section_header("Priority Actions", "Recommendation first, calculations behind expanders.")
     if brief.top_actions:
         st.dataframe(
             [
@@ -855,18 +960,25 @@ def page_my_team(league) -> None:
 
 
 def page_players(league) -> None:
-    st.header("Players")
+    page_header("Players", "Research", "Search, compare, and inspect player projections without leaving the player workspace.", [status_badge(league_label(league))])
     players = [p for t in league.teams for p in t.players] + league.free_agents
     query = st.text_input("Search player or NFL team", value="")
     filtered = [p for p in players if not query or query.lower() in p.name.lower() or query.lower() in p.team.lower()]
     selected = st.selectbox("Player", filtered or players, format_func=player_label)
     data = player_research(league, selected.id)
     projection = data["projection"]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Weekly Projection", projection.mean)
-    c2.metric("Range", f"{projection.floor}-{projection.ceiling}")
-    c3.metric("Availability", pct(selected.availability))
-    c4.metric("Confidence", projection.confidence_label or pct(projection.confidence))
+    identity_index = build_identity_index(players, season=league.season)
+    identity = resolve_player_identity(selected.name, candidates=identity_index, position=selected.position, nfl_team_id=selected.team)
+    market = default_market_provider().get_player_market(selected.id)
+    st.markdown(player_card(selected, projection), unsafe_allow_html=True)
+    metric_grid(
+        [
+            metric_card("Baseline Projection", fmt_points(projection.baseline_projection or projection.baseline_value), projection.baseline_source, "blue"),
+            metric_card("Final Projection", fmt_points(projection.final_projection or projection.mean), "Baseline plus validated adjustments", "green"),
+            metric_card("Range", f"{fmt_points(projection.floor)}-{fmt_points(projection.ceiling)}", "Lower to upper estimate", "gold"),
+            metric_card("Market Context", "Available" if market.available else "Unavailable", market.metadata.data_quality, "purple"),
+        ]
+    )
     tabs = st.tabs(["Decision View", "Projection", "Market/Draft", "History", "Model Details"])
     with tabs[0]:
         add_relevance = "Free agent" if not selected.rostered else "Rostered"
@@ -875,9 +987,30 @@ def page_players(league) -> None:
         st.write("Start/add/trade relevance is derived from lineup, waiver, and trade features inside My Team.")
     with tabs[1]:
         st.write(f"Baseline source: {projection.baseline_source}")
+        st.write(f"Baseline projection: {projection.baseline_projection or projection.baseline_value}")
+        st.write(f"Market adjustment: {projection.market_adjustment}")
+        st.write(f"Final projection: {projection.final_projection or projection.mean}")
+        st.write(f"Market data available: {projection.market_data_available}")
+        st.write(f"Market data quality: {projection.market_data_quality}")
         st.dataframe(projection.adjustments, hide_index=True, use_container_width=True)
         st.write("Missing inputs:", ", ".join(projection.missing) if projection.missing else "None")
     with tabs[2]:
+        st.write("Canonical identity")
+        st.json(
+            {
+                "canonical_player_id": identity.canonical_player_id,
+                "normalized_name": identity.normalized_name,
+                "nfl_team_id": identity.nfl_team_id,
+                "resolved": identity.resolved,
+                "ambiguous": identity.ambiguous,
+                "reason": identity.reason,
+            }
+        )
+        st.write("Market context")
+        if market.available:
+            st.json(asdict(market))
+        else:
+            st.info(market.unavailable_reason or "No available market data. No betting line is fabricated.")
         if selected.position in SUPPORTED_MODEL_POSITIONS:
             settings = draft_settings_from_state(league)
             board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, set())
@@ -899,7 +1032,7 @@ def page_players(league) -> None:
 
 
 def page_league(league) -> None:
-    st.header("League")
+    page_header("League", "Outlook", "Standings, playoff context, scenarios, power, and schedule luck.", [status_badge(league_label(league))])
     st.caption("Standings, playoff outlook, scenarios, power, and schedule context in one league workspace.")
     tabs = st.tabs(["Outlook", "Standings", "Scenarios", "Power", "Schedule Luck", "Team Detail"])
     with tabs[0]:
@@ -931,7 +1064,7 @@ def page_draft_context(league) -> None:
 
 
 def page_settings(league) -> None:
-    st.header("Settings")
+    page_header("Settings", "Operations", "Connection, data freshness, privacy, evaluation, and launch-readiness controls.", [status_badge(league_label(league))])
     st.caption("Connection, data freshness, privacy, strategy, and technical limits.")
     st.session_state.draft_mode = st.toggle("Show contextual Draft destination", value=bool(st.session_state.draft_mode))
     summary = health_summary(league)
@@ -969,6 +1102,21 @@ def page_settings(league) -> None:
             st.warning(" ".join(warnings))
     with tabs[3]:
         page_data_sources(league)
+        st.subheader("Manual Refresh")
+        st.write("Streamlit Community Cloud is not treated as a durable background worker. Refreshes are manual, cooldown-protected, and session-local.")
+        if st.session_state.last_manual_refresh:
+            st.caption(f"Last manual refresh: {st.session_state.last_manual_refresh}")
+        if st.button("Refresh provider status", use_container_width=True):
+            import time
+            from datetime import UTC, datetime
+
+            now = time.time()
+            if now - float(st.session_state.last_manual_refresh_epoch or 0) < 60:
+                st.warning("Refresh cooldown is active. Wait at least 60 seconds before trying again.")
+            else:
+                st.session_state.last_manual_refresh_epoch = now
+                st.session_state.last_manual_refresh = datetime.now(UTC).isoformat()
+                st.success("Provider status refreshed for this session. No duplicate background job was started.")
     with tabs[4]:
         page_methodology()
         with st.expander("Simulation details"):
@@ -989,6 +1137,26 @@ def page_settings(league) -> None:
             st.info(f"{ledger['message']} Current eligible sample: {ledger['sample_size']} / {ledger['minimum_sample']}.")
         else:
             st.json(ledger["metrics"])
+        st.subheader("Decision Journal")
+        rows = decision_journal_rows()
+        if rows:
+            st.dataframe(
+                [
+                    {
+                        "Created": row["created_at"],
+                        "Type": row["decision_type"],
+                        "Status": row["execution_status"],
+                        "Expected": row.get("expected_points"),
+                        "Confidence": row["confidence"],
+                        "Evaluated": row.get("evaluated_at") or "No",
+                    }
+                    for row in rows[:25]
+                ],
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("No recommendations have been recorded in this local decision journal yet.")
     with tabs[7]:
         st.subheader("Safe Feedback")
         st.write("Open a GitHub issue with the feature involved, expected behavior, actual behavior, safe error code, app version, and whether demo or live mode was used.")
@@ -997,7 +1165,7 @@ def page_settings(league) -> None:
 
 
 def page_data_sources(league) -> None:
-    st.header("Data Sources")
+    section_header("Provider Freshness", "Provider state, use, impact, and unavailable behavior.")
     rows = []
     for s in statuses(league.id == "demo"):
         rows.append(
@@ -1042,7 +1210,9 @@ def page_methodology() -> None:
         "then applies bounded contextual adjustments when data is actually available."
     )
     st.write("- Lineups are solved with exact search over legal slot assignments and unique-player constraints.")
-    st.write("- Safe, Balanced, and Upside differ only in how they weight heuristic uncertainty.")
+    st.write("- Conservative, Balanced, and Aggressive lineups differ by floor, expected points, and matchup-aware ceiling objectives.")
+    st.write("- Market context is optional; unavailable markets are labeled unavailable and never replace the baseline projection.")
+    st.write("- Recommendation previews and decision-journal records are local recommendation workflow artifacts, not ESPN transactions.")
     st.write("- Waivers and trades compare full legal lineups before and after the move.")
     st.write("- League outlook and playoff probabilities use normalized scheduled matchups when a schedule is available.")
     st.write("- Schedule-aware outputs are Monte Carlo estimates with separate mathematical status where exact enumeration is small enough.")
@@ -1082,11 +1252,11 @@ def main() -> None:
     league = st.session_state.league
     team = user_team(league)
     with st.sidebar:
-        st.title("Fourth Down")
-        st.caption(f"{league.name} | {team.name} | Week {league.week}")
-        st.markdown(status_badge(league_label(league)), unsafe_allow_html=True)
         pages = visible_pages()
-        page_name = st.radio("Section", list(pages.keys()), label_visibility="collapsed")
+        page_name = render_navigation(team.name, league.name, league.week, league_label(league), st.session_state.get("draft_mode", False))
+        pending = st.session_state.pop("pending_page", None)
+        if pending in pages:
+            page_name = pending
     pages[page_name](league)
 
 

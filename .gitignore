@@ -11,6 +11,11 @@ credentials.*.json
 secrets.json
 secrets.*.json
 .streamlit/secrets.toml
+tokens.json
+oauth2.json
+config.yaml
+config.local.yaml
+config.private.*
 cookies.txt
 cookies.json
 *.pem
