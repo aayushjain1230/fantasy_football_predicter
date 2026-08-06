@@ -433,6 +433,41 @@ class DraftIntelligenceService:
             row["fallback_used"] = False
         return sorted(base_rows, key=lambda row: (row["value_rank"], row["consensus_adp"]))
 
+    def pick_plan(
+        self,
+        league: League,
+        settings: DraftSettings,
+        drafted_ids: set[str],
+        user_drafted_positions: list[str],
+        backup_count: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Rank the best current pick and backups from live ESPN values only."""
+        board = self.current_board(league, settings, drafted_ids)
+        if not board:
+            return []
+        roster_targets = {
+            position: sum(1 for slot in league.roster_slots if slot == position)
+            for position in ("QB", "RB", "WR", "TE")
+        }
+        if "FLEX" in league.roster_slots:
+            roster_targets["RB"] += 1
+            roster_targets["WR"] += 1
+        counts = {position: user_drafted_positions.count(position) for position in roster_targets}
+        scored = []
+        for row in board:
+            position = row["position"]
+            need = max(0, roster_targets.get(position, 1) - counts.get(position, 0))
+            need_bonus = min(3.0, need * 1.25)
+            urgency = max(0.0, min(4.0, (settings.next_pick - row["consensus_adp"]) / max(2, settings.league_size)))
+            value_score = max(-4.0, min(6.0, row["adp_relative_value"] / max(2, settings.league_size / 2)))
+            score = row["expected_vor"] / 20 + need_bonus + urgency + value_score
+            reason = (
+                f"ESPN ADP {row['consensus_adp']}; value rank {row['value_rank']}; "
+                f"{position} roster need {need}; next scheduled pick {settings.next_pick}."
+            )
+            scored.append({**row, "pick_score": round(score, 2), "recommendation_reason": reason})
+        return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"]), reverse=True)[: backup_count + 1]
+
 
 def replacement_level(league: League, position: str, *, season: bool = False) -> float:
     teams = max(1, len(league.teams))

@@ -55,6 +55,7 @@ from app.config import APP_VERSION, CONFIG, config_summary, validate_config  # n
 from app.evaluation import evaluate_prediction_ledger  # noqa: E402
 from app.identity import build_identity_index, resolve_player_identity  # noqa: E402
 from app.market import default_market_provider  # noqa: E402
+from app.live_providers import odds as refresh_odds, validate_odds_key  # noqa: E402
 from app.operations import DEGRADATION_MATRIX, PERFORMANCE_BUDGETS, health_summary  # noqa: E402
 from app.persistence import decision_journal_rows, save_decision_journal_entry  # noqa: E402
 from app.recommendations import generate_recommendation, require_confirmation, validate_recommendation  # noqa: E402
@@ -121,6 +122,10 @@ def ensure_state() -> None:
         st.session_state.last_manual_refresh = None
     if "last_manual_refresh_epoch" not in st.session_state:
         st.session_state.last_manual_refresh_epoch = 0.0
+    if "odds_api_key" not in st.session_state:
+        st.session_state.odds_api_key = ""
+    if "odds_connection" not in st.session_state:
+        st.session_state.odds_connection = None
 
 
 def league_label(league) -> str:
@@ -614,23 +619,62 @@ def page_draft_intelligence(league) -> None:
 
 
 def page_draft_room(league) -> None:
-    section_header("Live Draft State", "Session-local pick tracking and next-pick context.")
+    section_header("Live Draft Room", "Best available pick, ranked backups, roster fit, and snake-draft tracking from live ESPN data.")
     league_size = max(2, len(league.teams) or 12)
     st.session_state.draft_slot = st.number_input("Your draft slot", min_value=1, max_value=league_size, value=int(st.session_state.draft_slot), step=1)
     st.session_state.current_pick = st.number_input("Current overall pick", min_value=1, max_value=300, value=int(st.session_state.current_pick), step=1)
     settings = draft_settings_from_state(league)
-    st.metric("Next user pick", settings.next_pick)
-    board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, {pick["player_id"] for pick in st.session_state.draft_picks})
+    current_pick = int(st.session_state.current_pick)
+    round_index = (current_pick - 1) // league_size
+    pick_in_round = ((current_pick - 1) % league_size) + 1
+    owner_slot = pick_in_round if round_index % 2 == 0 else league_size - pick_in_round + 1
+    drafted_ids = {pick["player_id"] for pick in st.session_state.draft_picks}
+    user_positions = [pick["position"] for pick in st.session_state.draft_picks if pick.get("owner_slot") == int(st.session_state.draft_slot)]
+    plan = DEFAULT_DRAFT_SERVICE.pick_plan(league, settings, drafted_ids, user_positions)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("On the clock", f"Slot {owner_slot}", "Your pick" if owner_slot == int(st.session_state.draft_slot) else "Opponent pick")
+    c2.metric("Your draft slot", int(st.session_state.draft_slot))
+    c3.metric("Your next pick", current_pick if owner_slot == int(st.session_state.draft_slot) else settings.next_pick)
+    if plan:
+        best = plan[0]
+        if owner_slot == int(st.session_state.draft_slot):
+            st.success(f"Best pick now: {best['player_name']} ({best['position']}, {best['team']})")
+        else:
+            st.info(f"Current top target for your next pick: {best['player_name']} ({best['position']}, {best['team']})")
+        st.caption(best["recommendation_reason"] + " This is a decision estimate from live ESPN inputs, not a guarantee.")
+        st.subheader("Backups if your first choice is taken")
+        st.dataframe(
+            [
+                {
+                    "Order": index + 1,
+                    "Player": row["player_name"],
+                    "Pos": row["position"],
+                    "Team": row["team"],
+                    "ESPN ADP": row["consensus_adp"],
+                    "Season Projection": row["season_projection"],
+                    "VOR": row["expected_vor"],
+                    "Roster/Fall Risk Score": row["pick_score"],
+                    "Why": row["recommendation_reason"],
+                }
+                for index, row in enumerate(plan)
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("ESPN has not supplied enough live ADP and season-projection data to make a draft recommendation.")
+    board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted_ids)
     if board:
-        pick = st.selectbox("Mark drafted", board, format_func=lambda row: f"{row['player_name']} ({row['position']})")
-        if st.button("Record pick"):
+        pick = st.selectbox("Player selected at this overall pick", board, format_func=lambda row: f"{row['player_name']} ({row['position']}, {row['team']})")
+        if st.button("Record selected player", type="primary", use_container_width=True):
             if pick["player_id"] not in {p["player_id"] for p in st.session_state.draft_picks}:
-                st.session_state.draft_picks.append({"number": len(st.session_state.draft_picks) + 1, "player_id": pick["player_id"], "player_name": pick["player_name"], "position": pick["position"]})
+                st.session_state.draft_picks.append({"number": current_pick, "owner_slot": owner_slot, "player_id": pick["player_id"], "player_name": pick["player_name"], "position": pick["position"]})
                 st.session_state.current_pick = int(st.session_state.current_pick) + 1
                 st.rerun()
     c1, c2, c3 = st.columns(3)
     if c1.button("Undo last pick", disabled=not st.session_state.draft_picks):
-        st.session_state.draft_picks.pop()
+        last = st.session_state.draft_picks.pop()
+        st.session_state.current_pick = int(last["number"])
         st.rerun()
     if c2.button("Reset draft"):
         st.session_state.draft_picks = []
@@ -1068,12 +1112,12 @@ def page_league(league) -> None:
 
 def page_draft_context(league) -> None:
     st.header("Draft")
-    st.caption("Contextual draft workspace. Disable draft mode in Settings after the draft.")
-    tabs = st.tabs(["Board", "Room"])
+    st.caption("Live ESPN draft assistant. Track every pick to continuously update the best choice and backups for your draft position.")
+    tabs = st.tabs(["Draft Room", "Full Board"])
     with tabs[0]:
-        page_draft_intelligence(league)
-    with tabs[1]:
         page_draft_room(league)
+    with tabs[1]:
+        page_draft_intelligence(league)
 
 
 def page_settings(league) -> None:
@@ -1088,7 +1132,6 @@ def page_settings(league) -> None:
         return
     page_header("Settings", "Operations", "Connection, data freshness, privacy, evaluation, and launch-readiness controls.", [status_badge(league_label(league))])
     st.caption("Connection, data freshness, privacy, strategy, and technical limits.")
-    st.session_state.draft_mode = st.toggle("Show contextual Draft destination", value=bool(st.session_state.draft_mode))
     summary = health_summary(league)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("App Version", summary["app_version"])
@@ -1124,6 +1167,46 @@ def page_settings(league) -> None:
             st.warning(" ".join(warnings))
     with tabs[3]:
         page_data_sources(league)
+        st.subheader("The Odds API")
+        st.write("Add your own key for this browser session. It is password-masked, never written to `.env`, SQLite, logs, exports, or the connected league.")
+        with st.form("odds_api_connection", clear_on_submit=True):
+            odds_key = st.text_input("Odds API key", type="password", value="")
+            validate_key = st.form_submit_button("Validate and use key")
+        if validate_key:
+            try:
+                result = asyncio.run(validate_odds_key(odds_key))
+                if result.get("valid"):
+                    st.session_state.odds_api_key = odds_key.strip()
+                    st.session_state.odds_connection = result
+                    st.success("Odds API key validated for this session.")
+                else:
+                    st.error(result.get("error", "The key could not be validated."))
+            except httpx.HTTPError:
+                st.error("The Odds API could not be reached. The key was not saved; try again later.")
+        if st.session_state.odds_api_key:
+            status = st.session_state.odds_connection or {}
+            st.success(f"Session key connected. Remaining credits reported: {status.get('remaining_requests') or 'unknown'}.")
+            c_odds1, c_odds2 = st.columns(2)
+            if c_odds1.button("Refresh live NFL odds", use_container_width=True):
+                try:
+                    with st.spinner("Loading live NFL totals, spreads, and moneylines..."):
+                        odds_result = asyncio.run(refresh_odds(force=True, api_key=st.session_state.odds_api_key))
+                    st.session_state.odds_connection = odds_result
+                    st.success(f"Live NFL odds loaded. Request cost: {odds_result.get('request_cost') or 'unknown'}; remaining: {odds_result.get('remaining_requests') or 'unknown'}.")
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in {401, 403}:
+                        st.error("The Odds API rejected the key. Remove it and paste a current key.")
+                    elif exc.response.status_code == 429:
+                        st.error("The Odds API quota or rate limit has been reached. Wait for the provider reset.")
+                    else:
+                        st.error("The Odds API returned an error. No invented market data was used.")
+                except httpx.HTTPError:
+                    st.error("The Odds API could not be reached. Existing cached odds, if any, were left unchanged.")
+            if c_odds2.button("Remove session key", use_container_width=True):
+                st.session_state.odds_api_key = ""
+                st.session_state.odds_connection = None
+                st.rerun()
+        st.caption("Key validation uses the provider's sports endpoint. Refreshing NFL totals, spreads, and moneylines consumes provider credits; a 15-minute refresh guard prevents accidental repeated calls.")
         st.subheader("Manual Refresh")
         st.write("Streamlit Community Cloud is not treated as a durable background worker. Refreshes are manual, cooldown-protected, and session-local.")
         if st.session_state.last_manual_refresh:
@@ -1148,7 +1231,7 @@ def page_settings(league) -> None:
         st.subheader("Session Reset")
         st.write("Reset clears Streamlit session state for league, draft, scenarios, selections, and private derived results. It does not remove data from ESPN or other providers.")
         if st.button("Reset this Streamlit session"):
-            for key in ["league", "mode", "draft_picks", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick"]:
+            for key in ["league", "mode", "draft_picks", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection"]:
                 st.session_state.pop(key, None)
             st.rerun()
     with tabs[6]:
@@ -1190,13 +1273,14 @@ def page_data_sources(league) -> None:
     section_header("Provider Freshness", "Provider state, use, impact, and unavailable behavior.")
     rows = []
     for s in statuses(False):
+        session_odds_key = s.provider == "The Odds API" and bool(st.session_state.get("odds_api_key"))
         rows.append(
             {
                 "Provider": s.provider,
                 "Category": s.category,
                 "State": s.state,
                 "Last Update": s.updated or "Unknown",
-                "Key Configured": s.key_configured,
+                "Key Configured": s.key_configured or session_odds_key,
                 "Used By": ", ".join(s.used_by) if s.used_by else "Not integrated",
                 "Impact": s.impact,
                 "Unavailable Behavior": s.unavailable_behavior,
@@ -1264,8 +1348,7 @@ def visible_pages() -> dict[str, object]:
             "Settings": page_settings,
         }
     pages = dict(PAGES)
-    if st.session_state.get("draft_mode"):
-        pages["Draft"] = page_draft_context
+    pages["Draft"] = page_draft_context
     return pages
 
 
@@ -1293,7 +1376,7 @@ def main() -> None:
             league_name,
             week,
             mode_label,
-            connected and st.session_state.get("draft_mode", False),
+            connected,
             list(pages),
         )
         pending = st.session_state.pop("pending_page", None)

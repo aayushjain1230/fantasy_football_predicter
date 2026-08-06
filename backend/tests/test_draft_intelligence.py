@@ -85,6 +85,20 @@ def test_missing_live_espn_draft_fields_returns_no_board(tmp_path):
     assert board == []
 
 
+def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 9)
+        player.season_projection = player.mean * 14
+    service = DraftIntelligenceService(tmp_path)
+    settings = DraftSettings(league_size=len(league.teams), current_pick=1, next_pick=8)
+    plan = service.pick_plan(league, settings, set(), [], backup_count=3)
+    assert len(plan) == min(4, len([p for p in league.free_agents if p.position in {"QB", "RB", "WR", "TE"}]))
+    assert all(not row["fallback_used"] for row in plan)
+    assert plan == sorted(plan, key=lambda row: (row["pick_score"], row["expected_vor"]), reverse=True)
+    assert all("ESPN ADP" in row["recommendation_reason"] for row in plan)
+
+
 def test_drafted_players_are_removed(tmp_path):
     dataset = build_draft_dataset(load_csv(ADP), load_csv(OUTCOMES))
     train_draft_artifact(dataset, tmp_path)

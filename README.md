@@ -21,6 +21,7 @@ Implemented and verified:
 - Waiver add/drop analysis based on full legal lineup impact
 - Trade analyzer with before/after legal roster impact and required-drop handling
 - Draft assistant using ESPN's live player pool, ADP, rankings, and season projections
+- Live snake-draft room with draft-slot awareness, roster-needs scoring, a best pick, ranked backups, and pick-by-pick recalculation
 - Player research with projection provenance and no synthetic history
 - Unified weekly brief with ranked user-facing decision objects
 - Primary Streamlit navigation consolidated to Home, My Team, Players, League, and Settings
@@ -109,6 +110,21 @@ Do not put one user's `ESPN_S2` or `ESPN_SWID` cookies into shared Streamlit
 deployment secrets. Private-league users can enter both values in password
 fields during connection; Fourth Down uses them for that ESPN request and does
 not persist them.
+
+### The Odds API in the website
+
+After connecting a league, open **Settings → Data Freshness → The Odds API**.
+Paste your key into the password field and select **Validate and use key**. The
+key lives only in that Streamlit browser session and is never written to the
+repository, `.env`, SQLite, provider cache, exports, or league data. Validation
+uses The Odds API sports endpoint. Select **Refresh live NFL odds** only when
+you want a new NFL totals/spreads/moneylines snapshot; the app displays the
+provider-reported request cost and remaining credits and suppresses refreshes
+inside a 15-minute window.
+
+For a private local installation, `ODDS_API_KEY` in `.env` remains supported.
+For a shared Streamlit deployment, prefer the session field so each user owns
+their key and quota.
 
 ## ESPN Leagues
 

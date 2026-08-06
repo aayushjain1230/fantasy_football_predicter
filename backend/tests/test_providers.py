@@ -4,6 +4,7 @@ import httpx
 
 from app.domain import DataState
 from app import providers
+from app import live_providers
 
 
 class FakeResponse:
@@ -160,3 +161,43 @@ def test_provider_status_uses_cached_odds_only_after_cache(monkeypatch):
     odds = next(row for row in rows if row.provider == "The Odds API")
     assert odds.state == DataState.CACHED
     assert odds.updated == "2026-01-01T00:00:00Z"
+
+
+def test_session_odds_key_validates_without_persistence(monkeypatch):
+    calls = []
+
+    class OddsResponse(FakeResponse):
+        headers = {"x-requests-remaining": "499", "x-requests-used": "1"}
+
+    class OddsClient(FakeClient):
+        async def get(self, url, params=None, headers=None):
+            calls.append({"url": url, "params": params})
+            return OddsResponse([{"key": "americanfootball_nfl"}])
+
+    monkeypatch.setattr(live_providers.httpx, "AsyncClient", OddsClient)
+    result = asyncio.run(live_providers.validate_odds_key("session-secret"))
+    assert result["valid"] is True
+    assert calls[0]["url"].endswith("/v4/sports")
+    assert calls[0]["params"] == {"apiKey": "session-secret"}
+    assert "session-secret" not in str(result)
+
+
+def test_session_odds_refresh_reports_quota_and_caches_payload_only(monkeypatch):
+    cached = []
+
+    class OddsResponse(FakeResponse):
+        headers = {"x-requests-remaining": "497", "x-requests-used": "3", "x-requests-last": "3"}
+
+    class OddsClient(FakeClient):
+        async def get(self, url, params=None, headers=None):
+            assert params["apiKey"] == "session-secret"
+            return OddsResponse([{"id": "game-1", "bookmakers": []}])
+
+    monkeypatch.setattr(live_providers.httpx, "AsyncClient", OddsClient)
+    monkeypatch.setattr(live_providers, "cache_get", lambda key: None)
+    monkeypatch.setattr(live_providers, "cache_set", lambda *args: cached.append(args))
+    result = asyncio.run(live_providers.odds(force=True, api_key="session-secret"))
+    assert result["status"] == "LIVE"
+    assert result["request_cost"] == "3"
+    assert result["remaining_requests"] == "497"
+    assert cached and "session-secret" not in str(cached)

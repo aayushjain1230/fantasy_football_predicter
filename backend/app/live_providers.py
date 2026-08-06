@@ -26,20 +26,46 @@ STADIUMS = {
 }
 
 
-async def odds(force: bool = False) -> dict:
+async def validate_odds_key(api_key: str) -> dict:
+    """Validate a session-supplied key against the zero-credit sports endpoint."""
+    key = (api_key or "").strip()
+    if not key:
+        return {"valid": False, "error": "Enter an Odds API key."}
+    async with httpx.AsyncClient(timeout=min(20, CONFIG.provider_timeout_seconds + 5)) as client:
+        response = await client.get("https://api.the-odds-api.com/v4/sports", params={"apiKey": key})
+    if response.status_code in {401, 403}:
+        return {"valid": False, "error": "The Odds API rejected that key. Copy it again from your account dashboard."}
+    if response.status_code == 429:
+        return {"valid": False, "error": "The Odds API rate limit is active. Wait and try again."}
+    response.raise_for_status()
+    return {
+        "valid": True,
+        "remaining_requests": response.headers.get("x-requests-remaining"),
+        "used_requests": response.headers.get("x-requests-used"),
+    }
+
+
+async def odds(force: bool = False, api_key: str | None = None) -> dict:
     cached = cache_get("odds:nfl")
     if cached and force:
         fetched=datetime.fromisoformat(cached["fetched_at"])
         if datetime.now(UTC)-fetched < timedelta(minutes=15): return {**cached,"quota_guard":"Refresh suppressed: minimum 15-minute interval"}
     if cached and not force and cached["status"] != "STALE": return cached
-    key = CONFIG.odds_api_key
+    key = (api_key or CONFIG.odds_api_key or "").strip()
     if not key: return cached or {"status": "UNAVAILABLE", "payload": [], "error": "ODDS_API_KEY is not configured"}
     url = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds"
     async with httpx.AsyncClient(timeout=min(20, CONFIG.provider_timeout_seconds + 5)) as client:
         response = await client.get(url, params={"apiKey": key, "regions": "us", "markets": "h2h,spreads,totals", "oddsFormat": "american"})
     response.raise_for_status(); payload = response.json(); now = datetime.now(UTC)
     cache_set("odds:nfl", "The Odds API", payload, now.isoformat(), (now + timedelta(hours=6)).isoformat())
-    return {"status": "LIVE", "payload": payload, "remaining_requests": response.headers.get("x-requests-remaining")}
+    return {
+        "status": "LIVE",
+        "payload": payload,
+        "remaining_requests": response.headers.get("x-requests-remaining"),
+        "used_requests": response.headers.get("x-requests-used"),
+        "request_cost": response.headers.get("x-requests-last"),
+        "fetched_at": now.isoformat(),
+    }
 
 
 async def weather(team: str, force: bool = False) -> dict:
