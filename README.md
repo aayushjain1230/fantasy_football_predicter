@@ -13,7 +13,7 @@ Phase 1 repaired technical credibility and provides a Streamlit app deployable o
 Implemented and verified:
 
 - Streamlit entrypoint at `streamlit_app.py`
-- Demo mode with clearly labeled sample data and no required API keys
+- Optional demo preview with clearly labeled sample data and no required API keys
 - Public ESPN league connection when ESPN permits public access
 - ESPN roster, lineup-slot, scoring, team, and free-agent normalization
 - Exact legal lineup optimization with unique-player constraints
@@ -88,7 +88,8 @@ Start the Streamlit app from the repository root:
 streamlit run streamlit_app.py
 ```
 
-The app opens in demo mode if no league is connected.
+The app opens in a connection-first state with no league data displayed. Demo
+data appears only when the user explicitly selects **Preview Demo (Optional)**.
 
 ## Streamlit Community Cloud
 

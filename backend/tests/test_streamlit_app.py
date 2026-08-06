@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from streamlit.testing.v1 import AppTest
+
 
 def test_streamlit_app_imports_without_running():
     import streamlit_app
@@ -31,6 +33,17 @@ def test_streamlit_app_does_not_load_shared_espn_cookies_from_streamlit_secrets(
 
     assert "ESPN_S2" not in streamlit_app.OPTIONAL_SECRET_KEYS
     assert "ESPN_SWID" not in streamlit_app.OPTIONAL_SECRET_KEYS
+
+
+def test_streamlit_starts_disconnected_without_displaying_demo_league():
+    app = AppTest.from_file("streamlit_app.py", default_timeout=30).run()
+    assert not app.exception
+    rendered = "\n".join(item.value for item in app.markdown)
+    assert "The Sunday League" not in rendered
+    assert "DEMO DATA" not in rendered
+    assert "No league connected" in rendered
+    assert app.radio[0].options == ["Home", "Settings"]
+    assert any(button.label == "Connect ESPN League" for button in app.button)
 
 
 def test_no_synthetic_sine_trend_left_in_backend():

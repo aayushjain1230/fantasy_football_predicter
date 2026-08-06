@@ -210,7 +210,7 @@ def stadium_hero() -> None:
         <section class="fd-stadium-hero">
           <div class="fd-stadium-vignette"></div>
           <div class="fd-hero-content">
-            <div class="fd-hero-kicker">Demo-ready | ESPN-connected | Read-only</div>
+            <div class="fd-hero-kicker">Live ESPN data | League-specific | Decision intelligence</div>
             <h1 class="fd-hero-title">Fourth Down<span class="fd-hero-title-accent">Smarter Fantasy Football Decisions</span></h1>
             <p class="fd-hero-description">
               Connect your ESPN league to get lineup, waiver, trade, draft, player, and playoff intelligence built around your actual team.

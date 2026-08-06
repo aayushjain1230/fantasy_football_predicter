@@ -125,7 +125,7 @@ def ensure_state() -> None:
 
 
 def league_label(league) -> str:
-    return "DEMO DATA" if league.id == "demo" else "SESSION LEAGUE DATA"
+    return "DEMO PREVIEW" if league.id == "demo" else "LIVE ESPN DATA"
 
 
 def pct(value: float) -> str:
@@ -268,7 +268,7 @@ def page_home(league) -> None:
                 st.session_state.pending_page = "Settings"
                 st.rerun()
         with c2:
-            if st.button("Try Demo League", use_container_width=True):
+            if st.button("Preview Demo (Optional)", use_container_width=True):
                 st.session_state.league = demo_league()
                 st.session_state.mode = "demo"
                 st.session_state.league_connected = True
@@ -362,7 +362,7 @@ def page_connect() -> None:
             st.success(f"Connected to {league.name}.")
         except Exception as exc:
             st.error(connect_error(exc))
-    if st.button("Reset to demo mode"):
+    if st.button("Disconnect league"):
         st.session_state.league = demo_league()
         st.session_state.mode = "demo"
         st.session_state.league_connected = False
@@ -1096,6 +1096,15 @@ def page_draft_context(league) -> None:
 
 
 def page_settings(league) -> None:
+    if not st.session_state.get("league_connected"):
+        page_header(
+            "Connect ESPN",
+            "Live Setup",
+            "Connect a public or private ESPN league before opening the decision workspace.",
+            [status_badge("NOT CONNECTED")],
+        )
+        page_connect()
+        return
     page_header("Settings", "Operations", "Connection, data freshness, privacy, evaluation, and launch-readiness controls.", [status_badge(league_label(league))])
     st.caption("Connection, data freshness, privacy, strategy, and technical limits.")
     st.session_state.draft_mode = st.toggle("Show contextual Draft destination", value=bool(st.session_state.draft_mode))
@@ -1271,6 +1280,11 @@ PAGES = {
 
 
 def visible_pages() -> dict[str, object]:
+    if not st.session_state.get("league_connected"):
+        return {
+            "Home": page_home,
+            "Settings": page_settings,
+        }
     pages = dict(PAGES)
     if st.session_state.get("draft_mode"):
         pages["Draft"] = page_draft_context
@@ -1282,10 +1296,28 @@ def main() -> None:
     render_shell_style()
     ensure_state()
     league = st.session_state.league
-    team = user_team(league)
     with st.sidebar:
         pages = visible_pages()
-        page_name = render_navigation(team.name, league.name, league.week, league_label(league), st.session_state.get("draft_mode", False))
+        connected = bool(st.session_state.get("league_connected"))
+        if connected:
+            team = user_team(league)
+            team_name = team.name
+            league_name = league.name
+            week: int | str = league.week
+            mode_label = league_label(league)
+        else:
+            team_name = "Connect your team"
+            league_name = "No league connected"
+            week = "—"
+            mode_label = "ESPN CONNECTION REQUIRED"
+        page_name = render_navigation(
+            team_name,
+            league_name,
+            week,
+            mode_label,
+            connected and st.session_state.get("draft_mode", False),
+            list(pages),
+        )
         pending = st.session_state.pop("pending_page", None)
         if pending in pages:
             page_name = pending

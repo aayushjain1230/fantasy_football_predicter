@@ -13,7 +13,14 @@ def focused_pages(include_draft: bool = False) -> list[str]:
     return pages
 
 
-def render_navigation(team_name: str, league_name: str, week: int, mode_label: str, include_draft: bool = False) -> str:
+def render_navigation(
+    team_name: str,
+    league_name: str,
+    week: int | str,
+    mode_label: str,
+    include_draft: bool = False,
+    available_pages: list[str] | None = None,
+) -> str:
     from .components import brand_mark, freshness_badge
     from .formatting import h
 
@@ -34,4 +41,8 @@ def render_navigation(team_name: str, league_name: str, week: int, mode_label: s
         """,
         unsafe_allow_html=True,
     )
-    return st.radio("Section", focused_pages(include_draft), label_visibility="collapsed")
+    return st.radio(
+        "Section",
+        available_pages or focused_pages(include_draft),
+        label_visibility="collapsed",
+    )
