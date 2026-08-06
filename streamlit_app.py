@@ -1206,6 +1206,23 @@ def page_settings(league) -> None:
                 st.session_state.odds_api_key = ""
                 st.session_state.odds_connection = None
                 st.rerun()
+            odds_snapshot = st.session_state.get("odds_connection") or {}
+            games = odds_snapshot.get("payload") if odds_snapshot.get("status") == "LIVE" else []
+            if games:
+                st.subheader("Current NFL market snapshot")
+                st.dataframe(
+                    [
+                        {
+                            "Matchup": f"{game.get('away_team', 'Unknown')} at {game.get('home_team', 'Unknown')}",
+                            "Kickoff": game.get("commence_time", "Unknown"),
+                            "Books": len(game.get("bookmakers", [])),
+                            "Markets": ", ".join(sorted({market.get("key", "") for book in game.get("bookmakers", []) for market in book.get("markets", []) if market.get("key")})),
+                        }
+                        for game in games
+                    ],
+                    hide_index=True,
+                    use_container_width=True,
+                )
         st.caption("Key validation uses the provider's sports endpoint. Refreshing NFL totals, spreads, and moneylines consumes provider credits; a 15-minute refresh guard prevents accidental repeated calls.")
         st.subheader("Manual Refresh")
         st.write("Streamlit Community Cloud is not treated as a durable background worker. Refreshes are manual, cooldown-protected, and session-local.")
