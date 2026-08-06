@@ -9,6 +9,8 @@ toolbarMode = "minimal"
 headless = true
 enableCORS = true
 enableXsrfProtection = true
+maxUploadSize = 1
+maxMessageSize = 10
 
 [theme]
 base = "dark"

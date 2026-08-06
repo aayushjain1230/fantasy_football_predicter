@@ -22,7 +22,6 @@ class SettingInfo:
 
 SETTINGS_REGISTRY = [
     SettingInfo("APP_ENV", "Public", cloud_safe=True),
-    SettingInfo("FOURTH_DOWN_DEMO_MODE", "Public", cloud_safe=True),
     SettingInfo("CURRENT_NFL_SEASON", "Public", cloud_safe=True),
     SettingInfo("DATABASE_URL", "Local-only", local_only=True, cloud_safe=False),
     SettingInfo("MULTI_USER_MODE", "Public", cloud_safe=True),
@@ -40,7 +39,6 @@ SETTINGS_REGISTRY = [
 @dataclass(frozen=True)
 class AppConfig:
     environment: str = "local"
-    demo_mode_enabled: bool = True
     current_nfl_season: int = 2026
     deployment_mode: str = "streamlit"
     database_url: str = "sqlite:///./fourth_down.db"
@@ -86,7 +84,6 @@ def load_config(overrides: Mapping[str, str] | None = None) -> AppConfig:
     origins = tuple(x.strip().rstrip("/") for x in values.get("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if x.strip())
     return AppConfig(
         environment=values.get("APP_ENV", values.get("FOURTH_DOWN_ENV", "local")),
-        demo_mode_enabled=_bool(values.get("FOURTH_DOWN_DEMO_MODE"), True),
         current_nfl_season=_int(values.get("CURRENT_NFL_SEASON"), 2026, 2020, 2035),
         deployment_mode=values.get("DEPLOYMENT_MODE", "streamlit"),
         database_url=values.get("DATABASE_URL", "sqlite:///./fourth_down.db"),
@@ -119,7 +116,6 @@ def config_summary(config: AppConfig | None = None) -> list[dict[str, object]]:
     config = config or load_config()
     present = {
         "APP_ENV": config.environment,
-        "FOURTH_DOWN_DEMO_MODE": config.demo_mode_enabled,
         "CURRENT_NFL_SEASON": config.current_nfl_season,
         "DATABASE_URL": bool(config.database_url),
         "MULTI_USER_MODE": config.multi_user_mode,

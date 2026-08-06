@@ -52,13 +52,12 @@ from app.providers import connect_espn, statuses  # noqa: E402
 from app.decision_service import build_weekly_brief, roster_outlook, value_based_faab  # noqa: E402
 from app.decision_journal import create_decision_entry  # noqa: E402
 from app.config import APP_VERSION, CONFIG, config_summary, validate_config  # noqa: E402
-from app.evaluation import evaluate_prediction_ledger  # noqa: E402
 from app.identity import build_identity_index, resolve_player_identity  # noqa: E402
 from app.market import default_market_provider  # noqa: E402
-from app.live_providers import odds as refresh_odds, validate_odds_key  # noqa: E402
+from app.live_providers import odds as refresh_odds, validate_odds_key, validate_openweather_key  # noqa: E402
 from app.operations import DEGRADATION_MATRIX, PERFORMANCE_BUDGETS, health_summary  # noqa: E402
-from app.persistence import decision_journal_rows, save_decision_journal_entry  # noqa: E402
 from app.recommendations import generate_recommendation, require_confirmation, validate_recommendation  # noqa: E402
+from app.security import allow_streamlit_action, streamlit_client_key  # noqa: E402
 from app.simulation import (  # noqa: E402
     ScenarioConstraint,
     league_fingerprint,
@@ -112,8 +111,6 @@ def ensure_state() -> None:
         st.session_state.draft_slot = 6
     if "current_pick" not in st.session_state:
         st.session_state.current_pick = 1
-    if "draft_mode" not in st.session_state:
-        st.session_state.draft_mode = False
     if "playoff_scenarios" not in st.session_state:
         st.session_state.playoff_scenarios = []
     if "playoff_scenario_history" not in st.session_state:
@@ -126,6 +123,27 @@ def ensure_state() -> None:
         st.session_state.odds_api_key = ""
     if "odds_connection" not in st.session_state:
         st.session_state.odds_connection = None
+    if "openweather_api_key" not in st.session_state:
+        st.session_state.openweather_api_key = ""
+    if "openweather_connection" not in st.session_state:
+        st.session_state.openweather_connection = None
+    if "decision_journal" not in st.session_state:
+        st.session_state.decision_journal = []
+
+
+def client_fingerprint() -> str:
+    try:
+        headers = dict(st.context.headers)
+    except Exception:
+        headers = {}
+    return streamlit_client_key(headers)
+
+
+def action_allowed(bucket: str, limit: int, window: int) -> bool:
+    allowed, retry = allow_streamlit_action(client_fingerprint(), bucket, limit, window)
+    if not allowed:
+        st.error(f"Too many attempts. Wait about {retry} seconds and try again.")
+    return allowed
 
 
 def league_label(league) -> str:
@@ -337,6 +355,8 @@ def page_connect() -> None:
         if team_id and not TEAM_RE.match(team_id):
             st.error("Team ID must be 1 to 10 digits.")
             return
+        if not action_allowed("espn-connect", 6, 300):
+            return
         try:
             with st.spinner("Requesting league data from ESPN..."):
                 league = asyncio.run(
@@ -366,6 +386,11 @@ def page_connect() -> None:
         st.session_state.playoff_scenarios = []
         st.session_state.playoff_scenario_history = []
         st.session_state.simulation_cache = {}
+        st.session_state.odds_api_key = ""
+        st.session_state.odds_connection = None
+        st.session_state.openweather_api_key = ""
+        st.session_state.openweather_connection = None
+        st.session_state.decision_journal = []
         st.rerun()
     st.info(
         "League data is browser-session scoped and may reset when Streamlit reconnects. "
@@ -440,8 +465,8 @@ def page_lineup(league) -> None:
                 explanation=preview.reasons,
                 execution_status=str(preview.status),
             )
-            save_decision_journal_entry(entry.to_row())
-            st.success("Recommendation recorded locally. No ESPN transaction was submitted.")
+            st.session_state.decision_journal.insert(0, entry.to_row())
+            st.success("Recommendation recorded in this browser session. No ESPN transaction was submitted.")
     st.subheader("All Risk Modes")
     for style in ("Conservative", "Balanced", "Aggressive"):
         result = optimize_lineup(team.players, league.roster_slots, style=style, league=league)
@@ -1173,6 +1198,8 @@ def page_settings(league) -> None:
             odds_key = st.text_input("Odds API key", type="password", value="")
             validate_key = st.form_submit_button("Validate and use key")
         if validate_key:
+            if not action_allowed("odds-key-validation", 5, 300):
+                return
             try:
                 result = asyncio.run(validate_odds_key(odds_key))
                 if result.get("valid"):
@@ -1188,6 +1215,8 @@ def page_settings(league) -> None:
             st.success(f"Session key connected. Remaining credits reported: {status.get('remaining_requests') or 'unknown'}.")
             c_odds1, c_odds2 = st.columns(2)
             if c_odds1.button("Refresh live NFL odds", use_container_width=True):
+                if not action_allowed("odds-refresh", 4, 900):
+                    return
                 try:
                     with st.spinner("Loading live NFL totals, spreads, and moneylines..."):
                         odds_result = asyncio.run(refresh_odds(force=True, api_key=st.session_state.odds_api_key))
@@ -1224,6 +1253,31 @@ def page_settings(league) -> None:
                     use_container_width=True,
                 )
         st.caption("Key validation uses the provider's sports endpoint. Refreshing NFL totals, spreads, and moneylines consumes provider credits; a 15-minute refresh guard prevents accidental repeated calls.")
+        st.subheader("OpenWeather")
+        st.write("Optional session-only key for weather-provider validation. Fourth Down will not apply weather to a projection until the game location and kickoff forecast are matched.")
+        with st.form("openweather_api_connection", clear_on_submit=True):
+            weather_key = st.text_input("OpenWeather API key", type="password", value="")
+            validate_weather = st.form_submit_button("Validate OpenWeather key")
+        if validate_weather:
+            if not action_allowed("openweather-key-validation", 5, 600):
+                return
+            try:
+                weather_result = asyncio.run(validate_openweather_key(weather_key))
+                if weather_result.get("valid"):
+                    st.session_state.openweather_api_key = weather_key.strip()
+                    st.session_state.openweather_connection = weather_result
+                    st.success("OpenWeather key validated for this session.")
+                else:
+                    st.error(weather_result.get("error", "The key could not be validated."))
+            except httpx.HTTPError:
+                st.error("OpenWeather could not be reached. The key was not saved; try again later.")
+        if st.session_state.openweather_api_key:
+            weather_status = st.session_state.openweather_connection or {}
+            st.success(f"OpenWeather connected for this session. Validation location: {weather_status.get('sample_station', 'available')}.")
+            if st.button("Remove OpenWeather session key", use_container_width=True):
+                st.session_state.openweather_api_key = ""
+                st.session_state.openweather_connection = None
+                st.rerun()
         st.subheader("Manual Refresh")
         st.write("Streamlit Community Cloud is not treated as a durable background worker. Refreshes are manual, cooldown-protected, and session-local.")
         if st.session_state.last_manual_refresh:
@@ -1245,22 +1299,29 @@ def page_settings(league) -> None:
             page_simulation_methodology(league)
     with tabs[5]:
         page_privacy()
+        st.subheader("Security posture")
+        security_rows = [
+            {"Control": "ESPN credentials", "Status": "Session only", "Details": "Password-masked; sent only to ESPN; never stored in SQLite, URL, logs, or exports."},
+            {"Control": "Provider API keys", "Status": "Session only", "Details": "Password-masked; outbound provider use only; removed on disconnect/reset."},
+            {"Control": "RLS", "Status": "Not applicable", "Details": "The public Streamlit app does not persist per-user records in a shared database. SQLite is blocked in multi-user mode."},
+            {"Control": "Rate limits", "Status": "Enabled", "Details": "Process-wide pseudonymous limits protect ESPN connection and provider validation/refresh actions."},
+            {"Control": "XSRF / CORS", "Status": "Enabled", "Details": "Streamlit XSRF and CORS protections are enabled in deployment configuration."},
+            {"Control": "AI endpoints", "Status": "Protected / unused", "Details": "FastAPI AI route is limited to 10 requests/minute; the Streamlit product uses no LLM endpoint."},
+            {"Control": "Demo data", "Status": "Disabled", "Details": "Live ESPN connection required; missing provider inputs stay unavailable."},
+        ]
+        st.dataframe(security_rows, hide_index=True, use_container_width=True)
         st.subheader("Session Reset")
         st.write("Reset clears Streamlit session state for league, draft, scenarios, selections, and private derived results. It does not remove data from ESPN or other providers.")
         if st.button("Reset this Streamlit session"):
-            for key in ["league", "mode", "draft_picks", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection"]:
+            for key in ["league", "mode", "draft_picks", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection", "openweather_api_key", "openweather_connection", "decision_journal"]:
                 st.session_state.pop(key, None)
             st.rerun()
     with tabs[6]:
         page_trust()
         st.subheader("Prediction Ledger Evaluation")
-        ledger = evaluate_prediction_ledger()
-        if ledger["status"] == "UNAVAILABLE":
-            st.info(f"{ledger['message']} Current eligible sample: {ledger['sample_size']} / {ledger['minimum_sample']}.")
-        else:
-            st.json(ledger["metrics"])
+        st.info("Real accuracy reporting remains unavailable until this browser session contains enough pre-game predictions and final outcomes. Shared SQLite evaluation is disabled on the public app.")
         st.subheader("Decision Journal")
-        rows = decision_journal_rows()
+        rows = list(st.session_state.get("decision_journal", []))
         if rows:
             st.dataframe(
                 [
@@ -1291,13 +1352,14 @@ def page_data_sources(league) -> None:
     rows = []
     for s in statuses(False):
         session_odds_key = s.provider == "The Odds API" and bool(st.session_state.get("odds_api_key"))
+        session_weather_key = s.provider == "OpenWeather" and bool(st.session_state.get("openweather_api_key"))
         rows.append(
             {
                 "Provider": s.provider,
                 "Category": s.category,
                 "State": s.state,
                 "Last Update": s.updated or "Unknown",
-                "Key Configured": s.key_configured or session_odds_key,
+                "Key Configured": s.key_configured or session_odds_key or session_weather_key,
                 "Used By": ", ".join(s.used_by) if s.used_by else "Not integrated",
                 "Impact": s.impact,
                 "Unavailable Behavior": s.unavailable_behavior,
@@ -1308,7 +1370,7 @@ def page_data_sources(league) -> None:
 
 def page_trust() -> None:
     st.header("Model Trust")
-    summary = calibration_summary()
+    summary = calibration_summary(rows=[])
     if summary.status == "UNAVAILABLE":
         st.warning(summary.verdict)
         st.write(f"Current real sample size: {summary.sample_size}. Minimum before reporting metrics: {summary.minimum_sample}.")
@@ -1345,7 +1407,9 @@ def page_privacy() -> None:
     st.write("- Session state is not authentication, tenant isolation, or permanent storage.")
     st.write("- Private ESPN cookies should not be placed in shared Streamlit app secrets.")
     st.write("- Local `.env` cookies are for local single-user use only.")
-    st.write("- SQLite persistence is local/ephemeral and is not a multi-user cloud database.")
+    st.write("- The public Streamlit app does not persist private per-user league records to SQLite.")
+    st.write("- Public odds/weather cache entries contain provider data only; they never contain API keys or ESPN credentials.")
+    st.write("- RLS is not claimed because there is no shared per-user database. Multi-user SQLite mode fails closed.")
     st.write("- Fourth Down does not submit ESPN transactions or provide betting advice.")
 
 

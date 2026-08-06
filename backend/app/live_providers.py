@@ -45,6 +45,29 @@ async def validate_odds_key(api_key: str) -> dict:
     }
 
 
+async def validate_openweather_key(api_key: str) -> dict:
+    """Validate a session key with a minimal current-weather request."""
+    key = (api_key or "").strip()
+    if not key:
+        return {"valid": False, "error": "Enter an OpenWeather API key."}
+    async with httpx.AsyncClient(timeout=min(20, CONFIG.provider_timeout_seconds + 5)) as client:
+        response = await client.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={"lat": 39.278, "lon": -76.623, "appid": key, "units": "imperial"},
+        )
+    if response.status_code in {401, 403}:
+        return {"valid": False, "error": "OpenWeather rejected that key. New keys can take time to activate."}
+    if response.status_code == 429:
+        return {"valid": False, "error": "OpenWeather's account rate limit is active. Wait and try again."}
+    response.raise_for_status()
+    payload = response.json()
+    return {
+        "valid": True,
+        "provider": "OpenWeather",
+        "sample_station": payload.get("name") or "Baltimore area",
+    }
+
+
 async def odds(force: bool = False, api_key: str | None = None) -> dict:
     cached = cache_get("odds:nfl")
     if cached and force:

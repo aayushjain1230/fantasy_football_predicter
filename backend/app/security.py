@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, threading, time
+import hashlib, os, secrets, threading, time
 from collections import defaultdict, deque
 from urllib.parse import urlparse
 from fastapi import Request
@@ -20,6 +20,20 @@ class SlidingWindowLimiter:
             if len(q)>=limit:return False,max(1,int(window-(now-q[0])))
             q.append(now);return True,0
 LIMITER=SlidingWindowLimiter()
+_STREAMLIT_SALT = secrets.token_bytes(32)
+
+
+def streamlit_client_key(headers: dict[str, str] | None = None) -> str:
+    """Return a process-local pseudonymous client key without retaining an IP."""
+    values = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+    forwarded = values.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    raw = forwarded or values.get("x-real-ip") or values.get("user-agent") or "streamlit-client"
+    return hashlib.sha256(_STREAMLIT_SALT + raw.encode("utf-8", "ignore")).hexdigest()[:32]
+
+
+def allow_streamlit_action(client_key: str, bucket: str, limit: int, window: int) -> tuple[bool, int]:
+    safe_bucket = "".join(char for char in bucket.lower() if char.isalnum() or char in {"-", "_"})[:40]
+    return LIMITER.allow(f"streamlit:{client_key}:{safe_bucket}", limit, window)
 class SecurityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self,request:Request,call_next):
         length=request.headers.get("content-length")

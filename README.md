@@ -53,7 +53,7 @@ Calculated estimates (real inputs, modeled outputs):
 - Projection uncertainty ranges
 - Trade value-balance score
 - Market adjustment layer is disabled unless explicitly enabled and remains bounded/provenance-labeled
-- Decision journal persistence is local SQLite/ephemeral on Streamlit Cloud, not permanent multi-user storage
+- Decision journal is browser-session-only on the public Streamlit app
 - Phase 4 simulation correlation structure and team-score intervals
 - Rest-of-season waiver gain is shown only when ESPN supplies season projections for both players
 - ESPN tiebreaker, reseeding, median-game, and multi-week playoff support when raw settings are ambiguous
@@ -126,6 +126,14 @@ For a private local installation, `ODDS_API_KEY` in `.env` remains supported.
 For a shared Streamlit deployment, prefer the session field so each user owns
 their key and quota.
 
+### OpenWeather in the website
+
+Open **Settings → Data Freshness → OpenWeather** and validate a key in the
+password-masked session field. The key is removed on disconnect or session
+reset and is never written to the provider cache. Weather is not applied to a
+fantasy projection until a real game location and kickoff-time forecast can be
+matched; validation alone never creates a synthetic weather adjustment.
+
 ## ESPN Leagues
 
 Public ESPN leagues:
@@ -149,8 +157,9 @@ Private ESPN leagues:
 | Provider | State Meaning | Used By | Unavailable Behavior |
 |---|---|---|---|
 | ESPN | Live only after a successful league response | Rosters, opponent rosters, scoring, lineup slots, weekly/season projections, ADP, rankings, and free agents | The affected recommendation remains unavailable |
-| The Odds API | Cached or stale only after a successful cached response | Bounded projection adjustment when cached data matches a team | Projection uses baseline and marks game markets missing |
+| The Odds API | Cached or stale only after a successful cached response | Live NFL totals/spreads/moneyline context | Not applied to ESPN projections; projection uses the ESPN baseline |
 | Open-Meteo | Not automatically refreshed in Streamlit Phase 1 | Weather adjustment only when a cache exists from supported backend paths | No weather adjustment is applied |
+| OpenWeather | Session key validation only until kickoff matching is available | Provider readiness | No weather adjustment is applied |
 | nflverse | Download endpoint exists, but parsed usage/injury integration is not implemented | Not integrated in Phase 1 | No nflverse adjustment is made |
 | Player props | Unavailable | Not integrated in Phase 1 | Player props are listed as missing |
 
@@ -312,8 +321,12 @@ Streamlit calls Python service functions directly. It does not start FastAPI as 
 
 - Public Streamlit state is stored in `st.session_state` per browser session
 - Streamlit session state can reset when the browser or server reconnects
-- Session state is not authentication, tenant isolation, or permanent storage
-- SQLite is local or ephemeral and is not appropriate for permanent multi-user cloud storage
+- League data, provider keys, draft state, and recommendation records are not persisted to shared SQLite by the public Streamlit app
+- Public provider cache rows contain odds/weather payloads only, never API keys, ESPN cookies, or private league data
+- RLS is intentionally marked not applicable because the public app has no shared per-user database; enabling multi-user mode with SQLite fails closed
+- ESPN connection and provider validation/refresh actions use process-wide sliding-window rate limits keyed by a salted, pseudonymous client fingerprint
+- FastAPI's template question endpoint is independently limited to 10 requests per minute; Streamlit does not call an LLM endpoint
+- XSRF and CORS protections are enabled in `.streamlit/config.toml`
 - `.streamlit/secrets.toml` and `.env` are ignored by Git
 - ESPN cookies should be treated like passwords
 - The app does not log, display, or persist ESPN cookies in the Streamlit UI
@@ -323,7 +336,7 @@ Streamlit calls Python service functions directly. It does not start FastAPI as 
 
 - ESPN fantasy endpoints are unofficial and may change
 - Public ESPN access depends on ESPN permitting the league response
-- Private league support needs a secure authenticated design before public hosting
+- Private league credentials are session-only and sent directly to ESPN, but users should enter them only on a deployment they trust
 - No historical weekly player trend is shown unless a real source is integrated
 - No nflverse usage/injury data is consumed by projections in Phase 1
 - Phase 2 committed artifacts are trained from small fixtures; production historical nflverse artifacts still need a reliable data retrieval run
@@ -334,7 +347,7 @@ Streamlit calls Python service functions directly. It does not start FastAPI as 
 - ESPN playoff tiebreakers, reseeding, median games, and multi-week playoff rounds are conditional when raw settings are unavailable or ambiguous
 - Current live partial scoring is not mixed with full projections; current-week simulation is pregame-only unless final
 - Player/team correlation modeling remains limited and is labeled as heuristic
-- One demo schedule is synthetic and visibly labeled; production credibility depends on ESPN returning a complete public schedule
+- Test fixtures remain in the repository for automated tests only and are never exposed as production league data
 - Trade value balance and draft availability are heuristics, not trained predictions
 - Fixture draft probabilities are architecture checks, not production-calibrated probabilities
 

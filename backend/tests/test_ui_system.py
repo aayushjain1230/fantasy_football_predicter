@@ -30,7 +30,7 @@ def test_badges_use_consistent_recommendation_labels():
 
 
 def test_global_css_contains_required_brand_tokens_and_responsive_rules():
-    for token in ("--fd-bg: #080A0F", "--fd-orange: #F97316", "--fd-green: #4ADE80", "--fd-purple: #8B5CF6"):
+    for token in ("--fd-bg: #080b10", "--fd-orange: #ff6a13", "--fd-green: #49d17d", "--fd-purple: #a98bff"):
         assert token in GLOBAL_CSS
     assert "@media (max-width: 760px)" in GLOBAL_CSS
     assert "prefers-reduced-motion" in GLOBAL_CSS
@@ -44,6 +44,6 @@ def test_navigation_stays_focused_and_draft_contextual():
 
 def test_chart_theme_and_formatting_are_consistent():
     assert FOURTH_DOWN_PLOTLY_LAYOUT["paper_bgcolor"] == "rgba(0,0,0,0)"
-    assert CHART_COLORS["orange"] == "#F97316"
+    assert CHART_COLORS["orange"] == "#FF6A13"
     assert percentage_points(0.031) == "+3.1 pts"
     assert "fd-metric-card" in metric_card("Projected Points", "123.4")

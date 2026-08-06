@@ -22,8 +22,8 @@ export default function Landing() {
       <div className="eyebrow"><Sparkles size={14}/> FREE • EXPLAINABLE • ESPN-CONNECTED</div>
       <h1>MAKE THE CALL<br/><em>BEFORE KICKOFF.</em></h1>
       <p className="hero-copy">A Vegas-first fantasy football engine that turns your league, roster, and matchup into decisions you can actually use.</p>
-      <div className="hero-actions"><Link className="button" href="/connect">Connect your league <ArrowRight size={18}/></Link><Link className="ghost" href="/dashboard">Explore the demo</Link></div>
-      <div className="trust"><ShieldCheck size={16}/> Runs free in demo mode. No card. No hidden prop subscription.</div>
+      <div className="hero-actions"><Link className="button" href="/connect">Connect your league <ArrowRight size={18}/></Link></div>
+      <div className="trust"><ShieldCheck size={16}/> Live ESPN data only. No card. No invented recommendations.</div>
     </section>
     <section className="feature-band" aria-label="Engine capabilities">{features.map(({icon:Icon,title,copy})=><article key={title}><Icon/><div><h2>{title}</h2><p>{copy}</p></div></article>)}</section>
     <section className="proof"><div><span className="kicker">DECISIONS, NOT DECORATION</span><h2>Your roster has a next best move.</h2><p>Fourth Down compares legal lineups, simulates score distributions, and pairs every recommendation with its impact, uncertainty, and missing data.</p></div><div className="decision-card"><div className="card-top"><span>TOP ACTION</span><span className="live-dot">DEMO DATA</span></div><h3>Claim Josh Downs</h3><p>Drop Jaylen Waddle only if his availability falls before waivers. Otherwise preserve WR depth.</p><div className="impact"><span>Expected gain <b>+1.2 pts</b></span><span>Confidence <b>68%</b></span></div></div></section>

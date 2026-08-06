@@ -5,7 +5,7 @@ CHART_COLORS = {
     "green": "#4ADE80",
     "blue": "#3B82F6",
     "gold": "#FBBF24",
-    "orange": "#F97316",
+    "orange": "#FF6A13",
     "red": "#EF4444",
     "purple": "#8B5CF6",
     "muted": "#5E6878",
@@ -31,4 +31,3 @@ FOURTH_DOWN_PLOTLY_LAYOUT = {
 def apply_plotly_theme(fig):
     fig.update_layout(**FOURTH_DOWN_PLOTLY_LAYOUT)
     return fig
-

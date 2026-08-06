@@ -201,3 +201,19 @@ def test_session_odds_refresh_reports_quota_and_caches_payload_only(monkeypatch)
     assert result["request_cost"] == "3"
     assert result["remaining_requests"] == "497"
     assert cached and "session-secret" not in str(cached)
+
+
+def test_openweather_key_validation_does_not_return_secret(monkeypatch):
+    class WeatherResponse(FakeResponse):
+        headers = {}
+
+    class WeatherClient(FakeClient):
+        async def get(self, url, params=None, headers=None):
+            assert url == "https://api.openweathermap.org/data/2.5/weather"
+            assert params["appid"] == "weather-secret"
+            return WeatherResponse({"name": "Baltimore"})
+
+    monkeypatch.setattr(live_providers.httpx, "AsyncClient", WeatherClient)
+    result = asyncio.run(live_providers.validate_openweather_key("weather-secret"))
+    assert result == {"valid": True, "provider": "OpenWeather", "sample_station": "Baltimore"}
+    assert "weather-secret" not in str(result)

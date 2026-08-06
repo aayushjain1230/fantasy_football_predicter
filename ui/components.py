@@ -199,10 +199,10 @@ def feature_tile(icon: str, label: str) -> str:
 def stadium_hero() -> None:
     tiles = "".join(
         [
-            feature_tile("+", "Injury Context"),
-            feature_tile("WX", "Weather Impact"),
-            feature_tile("VS", "Matchup Intelligence"),
-            feature_tile("#", "Weekly Rankings"),
+            feature_tile("IR", "Injury status"),
+            feature_tile("WX", "Game weather"),
+            feature_tile("VS", "Opponent context"),
+            feature_tile("VOR", "Draft & waivers"),
         ]
     )
     st.markdown(
@@ -210,10 +210,10 @@ def stadium_hero() -> None:
         <section class="fd-stadium-hero">
           <div class="fd-stadium-vignette"></div>
           <div class="fd-hero-content">
-            <div class="fd-hero-kicker">Live ESPN data | League-specific | Decision intelligence</div>
-            <h1 class="fd-hero-title">Fourth Down<span class="fd-hero-title-accent">Smarter Fantasy Football Decisions</span></h1>
+            <div class="fd-hero-kicker">Live inputs · Explainable models · No demo data</div>
+            <h1 class="fd-hero-title">Smarter fantasy football<span class="fd-hero-title-accent">decisions on fourth down</span></h1>
             <p class="fd-hero-description">
-              Connect your ESPN league to get lineup, waiver, trade, draft, player, and playoff intelligence built around your actual team.
+              Connect your ESPN league. Fourth Down reads the real roster, free-agent pool, draft market, schedule, and provider context—then shows the decision and the evidence behind it.
             </p>
             <div class="fd-feature-grid">{tiles}</div>
           </div>
