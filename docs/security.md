@@ -14,7 +14,10 @@ Threats considered:
 Controls implemented:
 
 - Streamlit session state holds connected league state; shared caches are avoided for private league objects.
-- ESPN cookies are local-only and not read from Streamlit secrets.
+- Shared ESPN cookies are not read from Streamlit secrets.
+- Private-league credentials entered in the connection form are password-masked,
+  passed directly to the ESPN request, and are not persisted in environment
+  variables, SQLite, exports, URLs, provider caches, or the connected league model.
 - Projection artifacts are repository-owned JSON files with schema and metadata validation.
 - CSV exports sanitize formula-like values.
 - FastAPI middleware limits request size, applies CORS checks, and rate-limits sensitive endpoints.
@@ -24,6 +27,8 @@ Controls implemented:
 Remaining limitations:
 
 - Streamlit session state is not authentication or permanent tenant isolation.
+- Users must enter ESPN credentials only into a deployment they trust; the
+  deployment operator controls the server process that makes the ESPN request.
 - SQLite is local/ephemeral and not cloud multi-user storage.
 - ESPN fantasy endpoints are unofficial and can change.
 - No third-party analytics are enabled by default.

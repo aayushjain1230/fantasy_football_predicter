@@ -108,7 +108,10 @@ OPENWEATHER_API_KEY = ""
 DIGEST_WEBHOOK_URL = ""
 ```
 
-Do not put `ESPN_S2` or `ESPN_SWID` cookies into a shared public Streamlit deployment. Private ESPN leagues are local-only in Phase 1.
+Do not put one user's `ESPN_S2` or `ESPN_SWID` cookies into shared Streamlit
+deployment secrets. Private-league users can enter both values in password
+fields during connection; Fourth Down uses them for that ESPN request and does
+not persist them.
 
 ## ESPN Leagues
 
@@ -126,10 +129,13 @@ Public ESPN leagues:
 
 Private ESPN leagues:
 
-- Private league support is local-only in Phase 1
-- A local single-user environment may provide `ESPN_S2` and `ESPN_SWID` through `.env`
-- Public users should not paste ESPN cookies into the Streamlit UI
-- Cookies are never displayed by the app and should never be committed
+- Enter the numeric league ID, season, and both `espn_s2` and `SWID` values
+- The credential fields are password-masked and cleared when the form submits
+- Credentials are sent only to ESPN for the connection request and are not
+  stored in SQLite, exports, URLs, caches, or the connected league object
+- A local single-user environment may instead provide `ESPN_S2` and
+  `ESPN_SWID` through `.env`
+- Only enter ESPN credentials on a deployment you trust, and never commit them
 
 ## Provider Table
 

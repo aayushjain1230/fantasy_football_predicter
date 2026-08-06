@@ -4,7 +4,7 @@
 |---|---|
 | ESPN unavailable | Preserve current session when present; otherwise offer demo mode. |
 | Public league not found | Show league-ID/season error. |
-| Private league detected | Explain private leagues are local-only. |
+| Private league detected | Request both session-only ESPN cookie values and never persist or log them. |
 | Projection artifact missing | Use labeled fallback projection engine. |
 | Current ADP unavailable | Hide market movement and label ADP unavailable. |
 | Odds API unavailable | Use neutral market context. |

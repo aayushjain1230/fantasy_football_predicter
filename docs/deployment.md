@@ -14,7 +14,10 @@ OPENWEATHER_API_KEY = ""
 DIGEST_WEBHOOK_URL = ""
 ```
 
-Do not configure `ESPN_S2` or `ESPN_SWID` in a shared public deployment. Private ESPN leagues are local-only until a reviewed authentication and tenant-isolation design exists.
+Do not configure one user's `ESPN_S2` or `ESPN_SWID` as shared deployment
+secrets. Private-league users enter both values in password fields when
+connecting. The values are used for that ESPN request and are not persisted by
+Fourth Down. Users should only enter them on a deployment they trust.
 
 Startup behavior:
 

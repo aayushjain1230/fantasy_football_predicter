@@ -240,9 +240,9 @@ def connect_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         if code == 404:
-            return "ESPN did not find that public league for the selected season."
+            return "ESPN did not find that league for the selected season. Check the league ID and season."
         if code in {401, 403}:
-            return "ESPN denied access. This is usually a private league; private league support is local-only in Phase 1."
+            return "ESPN denied access. For a private league, refresh both espn_s2 and SWID from the same signed-in ESPN browser session."
         if code == 429:
             return "ESPN is rate-limiting requests. Wait a few minutes and try again."
         return f"ESPN returned HTTP {code}. Try again later."
@@ -252,7 +252,11 @@ def connect_error(exc: Exception) -> str:
         return "Fourth Down could not reach ESPN from this runtime."
     if str(exc) == "TEAM_NOT_FOUND":
         return "That team ID was not found in the league."
-    return "The league could not be connected. Check the ID, season, and whether the league is public."
+    if str(exc) == "INCOMPLETE_ESPN_AUTH":
+        return "Private league authentication requires both espn_s2 and SWID. Enter both values or leave both blank."
+    if str(exc) == "INVALID_ESPN_AUTH":
+        return "The ESPN credential value is not valid. Copy fresh espn_s2 and SWID cookie values and try again."
+    return "The league could not be connected. Check the league ID, season, team ID, and private-league credentials."
 
 
 def page_home(league) -> None:
@@ -270,8 +274,8 @@ def page_home(league) -> None:
                 st.session_state.league_connected = True
                 st.rerun()
         warning_state(
-            "Private leagues are local-only",
-            "Fourth Down is read-only. Public ESPN leagues can connect from Streamlit; private ESPN cookies should not be entered into a public app.",
+            "Private leagues are supported",
+            "Use the private-league section in Settings. Credentials are used only for the current connection and are not saved by Fourth Down.",
         )
         return
 
@@ -305,12 +309,29 @@ def page_home(league) -> None:
 
 def page_connect() -> None:
     st.header("Connect League")
-    st.write("Use `demo` or a numeric public ESPN league ID. Private ESPN cookies are not accepted through this public UI.")
-    with st.form("connect"):
+    st.write("Use `demo` or a numeric ESPN league ID. Private leagues require both ESPN browser-cookie values.")
+    with st.form("connect", clear_on_submit=True):
         league_id = st.text_input("League ID", value="")
         season = st.number_input("Season", min_value=2020, max_value=2030, value=2026, step=1)
         team_id = st.text_input("Team ID (optional)", value="")
-        submitted = st.form_submit_button("Connect public league")
+        with st.expander("Private league authentication"):
+            st.caption(
+                "Only enter credentials on a deployment you trust. Fourth Down sends them to ESPN for this request "
+                "and does not save them to its database, environment, logs, URL, or connected league object."
+            )
+            espn_s2 = st.text_input(
+                "espn_s2 cookie",
+                value="",
+                type="password",
+                help="Copy the complete espn_s2 value from the cookies for espn.com in your signed-in browser.",
+            )
+            espn_swid = st.text_input(
+                "SWID cookie",
+                value="",
+                type="password",
+                help="Copy the SWID value, including braces if ESPN shows them.",
+            )
+        submitted = st.form_submit_button("Connect league")
     if submitted:
         league_id = league_id.strip()
         team_id = team_id.strip()
@@ -322,7 +343,15 @@ def page_connect() -> None:
             return
         try:
             with st.spinner("Requesting league data from ESPN..."):
-                league = asyncio.run(connect_espn(league_id, int(season), team_id or None))
+                league = asyncio.run(
+                    connect_espn(
+                        league_id,
+                        int(season),
+                        team_id or None,
+                        espn_s2=espn_s2,
+                        espn_swid=espn_swid,
+                    )
+                )
             st.session_state.league = league
             st.session_state.mode = "demo" if league.id == "demo" else "live"
             st.session_state.league_connected = True
@@ -342,7 +371,10 @@ def page_connect() -> None:
         st.session_state.playoff_scenario_history = []
         st.session_state.simulation_cache = {}
         st.rerun()
-    st.info("Session state is browser-session scoped and may reset when the Streamlit session reconnects.")
+    st.info(
+        "League data is browser-session scoped and may reset when Streamlit reconnects. "
+        "Private ESPN credentials are not retained after the connection form is submitted."
+    )
 
 
 def page_dashboard(league) -> None:

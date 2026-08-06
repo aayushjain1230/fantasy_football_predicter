@@ -11,10 +11,25 @@ from .demo import demo_league
 from .domain import DataState, League, LeagueRuleSet, Matchup, ProviderStatus
 
 
-async def connect_espn(league_id: str, season: int, team_id: str | None = None) -> League:
+async def connect_espn(
+    league_id: str,
+    season: int,
+    team_id: str | None = None,
+    *,
+    espn_s2: str | None = None,
+    espn_swid: str | None = None,
+) -> League:
     if league_id == "demo": return demo_league()
+    supplied_s2 = (espn_s2 or "").strip()
+    supplied_swid = (espn_swid or "").strip()
+    if bool(supplied_s2) != bool(supplied_swid):
+        raise ValueError("INCOMPLETE_ESPN_AUTH")
+    if len(supplied_s2) > 4096 or len(supplied_swid) > 256:
+        raise ValueError("INVALID_ESPN_AUTH")
     cookies = {}
-    if CONFIG.espn_s2 and CONFIG.espn_swid and not CONFIG.cloud_mode:
+    if supplied_s2 and supplied_swid:
+        cookies = {"espn_s2": supplied_s2, "SWID": supplied_swid}
+    elif CONFIG.espn_s2 and CONFIG.espn_swid and not CONFIG.cloud_mode:
         cookies = {"espn_s2": CONFIG.espn_s2, "SWID": CONFIG.espn_swid}
     url = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{league_id}"
     params = [("view", v) for v in ("mSettings", "mTeam", "mRoster", "mMatchup")]
@@ -120,7 +135,7 @@ def statuses(demo: bool = True) -> list[ProviderStatus]:
     now = datetime.now(UTC).isoformat()
     odds_cache = cache_get("odds:nfl")
     return [
-        ProviderStatus(provider="ESPN", category="League data", state=DataState.DEMO if demo else DataState.LIVE, updated=now if not demo else None, used_by=["rosters","lineup slots","baseline projections","free agents"], impact="Clearly labeled sample league" if demo else "Roster, scoring, lineup slots, and baseline projections were loaded for this session", unavailable_behavior="Demo mode remains available; private leagues require local credentials in Phase 1."),
+        ProviderStatus(provider="ESPN", category="League data", state=DataState.DEMO if demo else DataState.LIVE, updated=now if not demo else None, used_by=["rosters","lineup slots","baseline projections","free agents"], impact="Clearly labeled sample league" if demo else "Roster, scoring, lineup slots, and baseline projections were loaded for this session", unavailable_behavior="Demo mode remains available; private leagues require session-only espn_s2 and SWID credentials."),
         ProviderStatus(provider="The Odds API", category="Vegas game lines", state=DataState(odds_cache["status"]) if odds_cache else DataState.UNAVAILABLE, updated=odds_cache["fetched_at"] if odds_cache else None, key_configured=bool(CONFIG.odds_api_key), used_by=["bounded projection adjustment"], impact="Cached game totals can modestly adjust projections" if odds_cache else "No market adjustment is applied", unavailable_behavior="Projection uses the ESPN/demo baseline and marks game markets as missing."),
         ProviderStatus(provider="Open-Meteo", category="Weather", state=DataState.UNAVAILABLE, key_configured=False, used_by=["bounded projection adjustment when explicitly refreshed"], impact="Not refreshed for this session", unavailable_behavior="No weather adjustment is applied and stadium weather is marked missing."),
         ProviderStatus(provider="nflverse", category="Open NFL roster data", state=DataState.UNAVAILABLE, key_configured=False, used_by=[], impact="Downloaded data is not yet parsed into projections in Phase 1", unavailable_behavior="No usage or injury adjustment is made from nflverse."),

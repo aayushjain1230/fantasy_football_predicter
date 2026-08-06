@@ -115,6 +115,35 @@ def test_private_auth_error_is_not_decorated_with_secrets(monkeypatch):
         raise AssertionError("expected auth error")
 
 
+def test_private_credentials_are_sent_only_as_espn_cookies(monkeypatch):
+    FakeClient.calls = []
+    monkeypatch.setattr(providers.httpx, "AsyncClient", FakeClient)
+    league = asyncio.run(
+        providers.connect_espn(
+            "123",
+            2026,
+            espn_s2="private-s2",
+            espn_swid="{private-swid}",
+        )
+    )
+    assert league.name == "Public League"
+    assert FakeClient.calls
+    assert all(
+        call["cookies"] == {"espn_s2": "private-s2", "SWID": "{private-swid}"}
+        for call in FakeClient.calls
+    )
+
+
+def test_private_credentials_require_both_values():
+    try:
+        asyncio.run(providers.connect_espn("123", 2026, espn_s2="private-s2"))
+    except ValueError as exc:
+        assert str(exc) == "INCOMPLETE_ESPN_AUTH"
+        assert "private-s2" not in str(exc)
+    else:
+        raise AssertionError("expected incomplete private authentication error")
+
+
 def test_provider_statuses_are_honest_without_cache(monkeypatch):
     monkeypatch.setattr("app.persistence.cache_get", lambda key: None)
     monkeypatch.delenv("ODDS_API_KEY", raising=False)

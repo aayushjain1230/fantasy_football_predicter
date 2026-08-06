@@ -26,7 +26,7 @@ def test_streamlit_app_imports_without_running():
     assert not forbidden.intersection(streamlit_app.PAGES)
 
 
-def test_streamlit_app_does_not_load_espn_cookies_from_streamlit_secrets():
+def test_streamlit_app_does_not_load_shared_espn_cookies_from_streamlit_secrets():
     import streamlit_app
 
     assert "ESPN_S2" not in streamlit_app.OPTIONAL_SECRET_KEYS

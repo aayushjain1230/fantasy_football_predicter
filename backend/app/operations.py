@@ -13,7 +13,7 @@ from .simulation import MODEL_VERSION as SIMULATION_MODEL_VERSION
 DEGRADATION_MATRIX = [
     {"Failure": "ESPN unavailable", "Expected behavior": "Keep current session state when present; otherwise offer demo mode.", "Feature": "Connection"},
     {"Failure": "Public league not found", "Expected behavior": "Show league-ID/season error; do not switch to unlabeled demo data.", "Feature": "Connection"},
-    {"Failure": "Private league detected", "Expected behavior": "Explain private leagues are local-only for Phase 6 public deployment.", "Feature": "Connection"},
+    {"Failure": "Private league authentication missing or expired", "Expected behavior": "Request both session-only ESPN cookie values without persisting or logging them.", "Feature": "Connection"},
     {"Failure": "Projection artifact missing", "Expected behavior": "Use labeled fallback projection-adjustment engine.", "Feature": "Projections"},
     {"Failure": "Current ADP unavailable", "Expected behavior": "Hide market movement and label ADP unavailable.", "Feature": "Players/Draft"},
     {"Failure": "Odds API unavailable", "Expected behavior": "Use neutral market context and list game markets as missing.", "Feature": "Projection context"},
