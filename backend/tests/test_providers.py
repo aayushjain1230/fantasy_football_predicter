@@ -148,7 +148,7 @@ def test_provider_statuses_are_honest_without_cache(monkeypatch):
     monkeypatch.setattr("app.persistence.cache_get", lambda key: None)
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     states = {status.provider: status for status in providers.statuses(demo=True)}
-    assert states["ESPN"].state == DataState.DEMO
+    assert states["ESPN"].state == DataState.LIVE
     assert states["The Odds API"].state == DataState.UNAVAILABLE
     assert states["nflverse"].used_by == []
     assert "not yet parsed" in states["nflverse"].impact

@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 
 from .domain import League, LineupEntry, LineupResult, Player, Projection, WaiverMove
 from .projection_service import DEFAULT_PROJECTION_SERVICE, ProjectionService
-from .ros_service import project_ros
 
 
 def _live_factors(player: Player) -> tuple[float, float, list[str], list[str]]:
@@ -46,12 +45,12 @@ def project(player: Player, market_factor: float | None = None, context_factor: 
     adjustments=[
         {"name":"market_context","factor":round(market,3),"source":"cached game total when available"},
         {"name":"weather_context","factor":round(context,3),"source":"cached stadium forecast when available"},
-        {"name":"availability","factor":round(player.availability,3),"source":"ESPN injury/availability field or demo fixture"},
+        {"name":"availability","factor":round(player.availability,3),"source":"ESPN injury/availability field"},
     ]
     reasons = ["Baseline projection is adjusted only by bounded context", "Availability is applied directly to expected output",*live_reasons]
     if player.injury_status != "HEALTHY": reasons.append(f"{player.injury_status.title()} status lowers availability and raises uncertainty")
     final = round(mean, 2)
-    return Projection(player_id=player.id, baseline_source="ESPN weekly projection or demo fixture baseline", baseline_value=round(player.mean,2), baseline_projection=round(player.mean, 2), market_adjustment=0, final_projection=final, mean=final, median=final, floor=round(max(0, mean - 1.28 * sd), 2), ceiling=round(mean + 1.28 * sd, 2), confidence=round(max(.35, .82 - .08 * len(absent)), 2), adjustments=adjustments, reasons=reasons, missing=absent, limitations=["This is an explainable projection-adjustment engine, not a trained machine-learning projection model.", "Uncertainty ranges are heuristic and not empirically calibrated in Phase 1."], generated_at=datetime.now(UTC).isoformat())
+    return Projection(player_id=player.id, baseline_source=player.projection_source, baseline_value=round(player.mean,2), baseline_projection=round(player.mean, 2) if player.projection_available else None, market_adjustment=0, final_projection=final if player.projection_available else None, mean=final, median=final, floor=round(max(0, mean - 1.28 * sd), 2), ceiling=round(mean + 1.28 * sd, 2), confidence=round(max(.35, .82 - .08 * len(absent)), 2) if player.projection_available else 0, adjustments=adjustments, reasons=reasons, missing=absent if player.projection_available else ["ESPN weekly projection"], limitations=["ESPN projections are provider estimates, not guarantees.", "No fixture or synthetic projection is substituted when ESPN has no value."], generated_at=datetime.now(UTC).isoformat())
 
 
 def _eligible(player: Player, slot: str) -> bool:
@@ -155,11 +154,17 @@ def optimize_lineup(players: list[Player], slots: list[str], *, style: str = "ba
 
 def waiver_moves(league: League) -> list[WaiverMove]:
     team = next(t for t in league.teams if t.id == league.user_team_id)
+    if not any(player.projection_available for player in team.players):
+        return []
     before = optimize_lineup(team.players, league.roster_slots, league=league)
     results: list[WaiverMove] = []
     for add in league.free_agents:
+        if not add.projection_available:
+            continue
         best = None
         for drop in team.players:
+            if not drop.projection_available:
+                continue
             after_players = [p for p in team.players if p.id != drop.id] + [add]
             after = optimize_lineup(after_players, league.roster_slots, league=league)
             if not after.is_complete:
@@ -169,13 +174,12 @@ def waiver_moves(league: League) -> list[WaiverMove]:
                 best = (gain, drop, after)
         if not best or best[0] <= 0: continue
         gain, drop, _ = best
-        add_ros = project_ros(add, league)
-        drop_ros = project_ros(drop, league)
-        ros_gain = add_ros.expected_vor - drop_ros.expected_vor
+        has_ros = add.season_projection is not None and drop.season_projection is not None
+        ros_gain = (add.season_projection - drop.season_projection) if has_ros else 0.0
         drop_safety = _drop_safety(drop, team.players, league)
         faab_guidance = _faab_guidance(league, gain, ros_gain, add.position)
         category = "MUST ADD" if gain >= 4 else "STRONG ADD" if gain >= 2 else "TEAM-NEEDS FIT"
-        results.append(WaiverMove(add=add, drop=drop, weekly_gain=round(gain, 1), ros_gain=round(ros_gain, 1), category=category, confidence=.64, faab_percent=int(faab_guidance["suggested_high_percent"]), reasons=["Compares the best legal lineup before and after the add/drop.", "Rest-of-season impact sums week-specific projection-service outputs and replacement value rather than multiplying one week by a constant."], risks=["Role, injuries, and free-agent availability can change before waivers clear.", "Future opponent context and verified bye weeks are labeled missing until integrated."], drop_safety=drop_safety, faab_guidance=faab_guidance))
+        results.append(WaiverMove(add=add, drop=drop, weekly_gain=round(gain, 1), ros_gain=round(ros_gain, 1), category=category, confidence=.64 if has_ros else .5, faab_percent=int(faab_guidance["suggested_high_percent"]), reasons=["Compares the best legal lineup before and after the add/drop using ESPN weekly projections.", "Rest-of-season gain uses ESPN season projections when ESPN supplies both values."], risks=["Role, injuries, and free-agent availability can change before waivers clear.", "ESPN season projection unavailable; no rest-of-season advantage is claimed." if not has_ros else "Season projections are estimates, not guarantees."], drop_safety=drop_safety, faab_guidance=faab_guidance))
     return sorted(results, key=lambda m: m.weekly_gain, reverse=True)
 
 
@@ -185,12 +189,11 @@ def user_team(league: League):
 
 def _drop_safety(drop: Player, roster: list[Player], league: League) -> str:
     healthy_same_position = [p for p in roster if p.id != drop.id and p.position == drop.position and p.availability > 0.75]
-    ros = project_ros(drop, league)
-    if drop.mean >= 12 or ros.starter_level_weeks >= 3:
+    if drop.mean >= 12 or (drop.season_projection is not None and drop.season_projection >= 120):
         return "Do not drop"
     if len(healthy_same_position) <= 1:
         return "High-risk drop"
-    if ros.expected_vor > 8:
+    if drop.season_projection is not None and drop.season_projection >= 80:
         return "Situational drop"
     if drop.mean >= 8:
         return "Reasonable drop"

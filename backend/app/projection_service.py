@@ -292,8 +292,29 @@ class ProjectionService:
     def project_player(self, player: Player, league: League | None = None, week: int | None = None, context: ProjectionContext | None = None) -> Projection:
         from .engine import project as fallback_project
 
-        artifact = self.load_artifact(player.position)
         context = context or ProjectionContext(week=week or (league.week if league else 0), external_baseline=player.mean)
+        if player.projection_source.startswith("ESPN"):
+            live = fallback_project(player)
+            return live.model_copy(
+                update={
+                    "week": context.week,
+                    "baseline_source": player.projection_source,
+                    "baseline_projection": player.mean if player.projection_available else None,
+                    "final_projection": live.mean if player.projection_available else None,
+                    "model_name": "espn_live_baseline",
+                    "model_version": f"espn-{league.season if league else 'live'}",
+                    "fallback_used": False,
+                    "fallback_reason": "",
+                    "confidence_label": "provider baseline" if player.projection_available else "unavailable",
+                    "data_completeness": 1.0 if player.projection_available else 0.0,
+                    "missing": live.missing if player.projection_available else ["ESPN weekly projection"],
+                    "limitations": [
+                        "ESPN projections are provider estimates, not guarantees.",
+                        "Fourth Down does not substitute fixture or synthetic projections when ESPN has no value.",
+                    ],
+                }
+            )
+        artifact = self.load_artifact(player.position)
         fallback = fallback_project(player)
         fallback = fallback.model_copy(
             update={

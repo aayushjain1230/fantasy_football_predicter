@@ -390,42 +390,67 @@ class DraftIntelligenceService:
         return artifact
 
     def current_board(self, league: League, settings: DraftSettings, drafted_ids: set[str] | None = None) -> list[dict[str, Any]]:
-        artifact = self.load_artifact()
-        players = [p for t in league.teams for p in t.players] + league.free_agents
         drafted_ids = drafted_ids or set()
-        board_rows = []
-        for index, player in enumerate(players, 1):
-            if player.id in drafted_ids or player.position not in {"QB", "RB", "WR", "TE"}:
-                continue
-            projection = DEFAULT_PROJECTION_SERVICE.project_player(player, league=league, week=league.week)
-            fallback_adp = index * 8 + {"QB": 18, "RB": 4, "WR": 6, "TE": 24}.get(player.position, 50)
-            row = {
-                "player_id": player.id,
-                "player_name": player.name,
-                "position": player.position,
-                "team": player.team,
-                "consensus_adp": fallback_adp,
-                "position_adp": index,
-                "adp_stddev": 10,
-                "expected_vor": projection.mean * 14 - replacement_level(league, player.position),
-                "phase2_uncertainty": max(1, projection.ceiling - projection.floor),
-                "games_played_prev": 12,
-            }
-            if artifact:
-                board_rows.append(predict_draft_player(artifact, row, settings))
-            else:
-                board_rows.append({**row, "fallback_used": True, "fallback_reason": "Draft artifact unavailable", "available_next_pick_probability": availability_at_next_pick(fallback_adp, 10, settings.next_pick)["probability_available"], "tier": None})
-        return assign_tiers(board_rows) if artifact else sorted(board_rows, key=lambda r: r["expected_vor"], reverse=True)
+        players = [
+            player
+            for player in league.free_agents
+            if player.id not in drafted_ids
+            and player.position in {"QB", "RB", "WR", "TE"}
+            and player.average_draft_position is not None
+            and player.season_projection is not None
+        ]
+        if not players:
+            return []
+        replacement = {
+            position: replacement_level(league, position, season=True)
+            for position in {player.position for player in players}
+        }
+        base_rows = []
+        for player in players:
+            season_value = float(player.season_projection or 0)
+            vor = season_value - replacement.get(player.position, 0)
+            base_rows.append(
+                {
+                    "player_id": player.id,
+                    "player_name": player.name,
+                    "position": player.position,
+                    "team": player.team,
+                    "consensus_adp": round(float(player.average_draft_position), 2),
+                    "espn_rank": player.espn_rank,
+                    "percent_owned": player.percent_owned,
+                    "season_projection": round(season_value, 2),
+                    "expected_vor": round(vor, 2),
+                }
+            )
+        by_value = sorted(base_rows, key=lambda row: (row["expected_vor"], -row["consensus_adp"]), reverse=True)
+        value_rank = {row["player_id"]: rank for rank, row in enumerate(by_value, 1)}
+        for row in base_rows:
+            row["value_rank"] = value_rank[row["player_id"]]
+            row["adp_relative_value"] = round(row["consensus_adp"] - row["value_rank"], 2)
+            row["tier"] = 1 + (row["value_rank"] - 1) // max(1, settings.league_size)
+            row["confidence"] = "ESPN live ADP + season projection"
+            row["availability_method"] = "ESPN average draft position; no fabricated next-pick probability"
+            row["fallback_used"] = False
+        return sorted(base_rows, key=lambda row: (row["value_rank"], row["consensus_adp"]))
 
 
-def replacement_level(league: League, position: str) -> float:
+def replacement_level(league: League, position: str, *, season: bool = False) -> float:
     teams = max(1, len(league.teams))
     slot_count = sum(1 for slot in league.roster_slots if slot == position)
     flex_share = 0.35 if position in {"RB", "WR", "TE"} and "FLEX" in league.roster_slots else 0
     superflex_share = 0.5 if position == "QB" and "SUPERFLEX" in league.roster_slots else 0
     starters = teams * max(1, slot_count + flex_share + superflex_share)
     all_players = [p for t in league.teams for p in t.players if p.position == position] + [p for p in league.free_agents if p.position == position]
-    values = sorted((p.mean * 14 for p in all_players), reverse=True)
+    values = sorted(
+        (
+            float(p.season_projection)
+            if season and p.season_projection is not None
+            else p.mean * 14
+            for p in all_players
+            if not season or p.season_projection is not None
+        ),
+        reverse=True,
+    )
     index = min(len(values) - 1, max(0, int(starters) - 1))
     return values[index] if values else 0.0
 

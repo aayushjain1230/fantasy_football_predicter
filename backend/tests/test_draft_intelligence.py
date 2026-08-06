@@ -67,20 +67,22 @@ def test_training_artifact_probabilities_sum_and_board_tiers(tmp_path):
     artifact = train_draft_artifact(dataset, tmp_path)
     assert artifact["metadata"]["model_version"] == "phase3_fixture_v1"
     service = DraftIntelligenceService(tmp_path)
-    board = service.current_board(demo_league(), DraftSettings(current_pick=1, next_pick=24), drafted_ids=set())
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 10)
+        player.season_projection = player.mean * 14
+    board = service.current_board(league, DraftSettings(current_pick=1, next_pick=24), drafted_ids=set())
     assert board
     row = board[0]
-    total = row["outperform_probability"] + row["meet_probability"] + row["underperform_probability"]
-    assert abs(total - 1) <= 0.002
+    assert row["confidence"] == "ESPN live ADP + season projection"
+    assert "probability" in row["availability_method"]
     assert "tier" in row
 
 
-def test_missing_draft_artifact_uses_labeled_fallback(tmp_path):
+def test_missing_live_espn_draft_fields_returns_no_board(tmp_path):
     service = DraftIntelligenceService(tmp_path)
     board = service.current_board(demo_league(), DraftSettings(current_pick=1, next_pick=24), drafted_ids=set())
-    assert board
-    assert board[0]["fallback_used"]
-    assert "unavailable" in board[0]["fallback_reason"].lower()
+    assert board == []
 
 
 def test_drafted_players_are_removed(tmp_path):

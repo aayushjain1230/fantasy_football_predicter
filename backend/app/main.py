@@ -7,7 +7,6 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
-from .demo import demo_league
 from .engine import optimize_lineup, user_team, waiver_moves
 from .providers import connect_espn, statuses
 from .persistence import delete_all_user_data, load_state, record_prediction, save_state
@@ -22,11 +21,11 @@ app = FastAPI(title="Fourth Down API", version="0.3.0")
 app.add_middleware(SecurityMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(allowed_origins()), allow_methods=["GET","POST","DELETE","OPTIONS"], allow_headers=["Content-Type"], allow_credentials=False)
 _saved = load_state("current_league")
-CURRENT = __import__('app.domain',fromlist=['League']).League.model_validate(_saved) if _saved else demo_league()
+CURRENT = __import__('app.domain',fromlist=['League']).League.model_validate(_saved) if _saved and _saved.get("id") != "demo" else None
 
 
 class ConnectRequest(BaseModel):
-    league_id: str = Field(min_length=1, max_length=30, pattern=r"^(demo|[0-9]{1,30})$")
+    league_id: str = Field(min_length=1, max_length=30, pattern=r"^[0-9]{1,30}$")
     season: int = Field(ge=2020, le=2030)
     team_id: str | None = Field(default=None, pattern=r"^[0-9]{1,10}$")
 
@@ -72,8 +71,16 @@ async def http_error(_:Request,exc:HTTPException):
     return JSONResponse(status_code=exc.status_code,content=error_payload(code,message,hint,exc.status_code>=500))
 
 
+@app.middleware("http")
+async def require_live_league(request: Request, call_next):
+    allowed = {"/api/health", "/api/connect", "/api/privacy"}
+    if request.url.path.startswith("/api/") and request.url.path not in allowed and CURRENT is None:
+        return JSONResponse(status_code=409, content=error_payload("LEAGUE_NOT_CONNECTED", "Connect a live ESPN league before using this feature.", "Enter your numeric ESPN league ID in Settings, then try again."))
+    return await call_next(request)
+
+
 @app.get("/api/health")
-def health(): return {"status": "ok", "mode": "demo" if CURRENT.id == "demo" else "live"}
+def health(): return {"status": "ok", "mode": "live" if CURRENT is not None else "disconnected"}
 
 
 @app.post("/api/connect")
@@ -85,9 +92,9 @@ async def connect(req: ConnectRequest):
             raise AppError(404,"LEAGUE_NOT_FOUND","ESPN did not return any teams for that league.","Check the league ID and season. For a private league, also verify your ESPN cookies.")
         save_state("current_league", CURRENT.model_dump(mode="json"))
         warnings=[]
-        if CURRENT.id!="demo" and not any(team.players for team in CURRENT.teams): warnings.append("League connected, but ESPN returned no rostered players. This can happen before rosters are populated or when private-league cookies have expired.")
-        if CURRENT.id!="demo" and not CURRENT.free_agents: warnings.append("League connected, but ESPN did not return a free-agent pool. Waiver recommendations will remain unavailable until the next refresh.")
-        return {"league": CURRENT, "mode": "demo" if CURRENT.id == "demo" else "live", "warnings":warnings}
+        if not any(team.players for team in CURRENT.teams): warnings.append("League connected, but ESPN returned no rostered players. This can happen before rosters are populated or when private-league cookies have expired.")
+        if not CURRENT.free_agents: warnings.append("League connected, but ESPN did not return a free-agent pool. Waiver recommendations will remain unavailable until the next refresh.")
+        return {"league": CURRENT, "mode": "live", "warnings":warnings}
     except AppError:
         raise
     except ValueError as exc:
@@ -112,7 +119,7 @@ def overview():
     team = user_team(CURRENT)
     lineup = optimize_lineup(team.players, CURRENT.roster_slots) if team.players else None
     if lineup: record_prediction(CURRENT.id,CURRENT.season,CURRENT.week,"weekly_lineup",lineup.expected_score,lineup.win_probability)
-    return {"league": CURRENT, "team": team, "lineup": lineup, "actions": waiver_moves(CURRENT)[:2], "data_status": statuses(CURRENT.id == "demo"), "mode": "demo" if CURRENT.id == "demo" else "live"}
+    return {"league": CURRENT, "team": team, "lineup": lineup, "actions": waiver_moves(CURRENT)[:2], "data_status": statuses(False), "mode": "live"}
 
 
 @app.get("/api/lineup")
@@ -122,11 +129,11 @@ def lineup():
 
 
 @app.get("/api/waivers")
-def waivers(): return {"moves": waiver_moves(CURRENT), "mode": "demo" if CURRENT.id == "demo" else "live"}
+def waivers(): return {"moves": waiver_moves(CURRENT), "mode": "live"}
 
 
 @app.get("/api/data-sources")
-def data_sources(): return statuses(CURRENT.id == "demo")
+def data_sources(): return statuses(False)
 
 
 @app.get("/api/draft")
@@ -252,8 +259,8 @@ def privacy_summary():
 @app.delete("/api/privacy/data")
 def delete_data(req:DeleteDataRequest):
     global CURRENT
-    delete_all_user_data(); CURRENT=demo_league()
-    return {"deleted":True,"mode":"demo"}
+    delete_all_user_data(); CURRENT=None
+    return {"deleted":True,"mode":"disconnected"}
 
 
 @app.get("/api/settings")

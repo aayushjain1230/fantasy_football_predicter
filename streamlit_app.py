@@ -45,7 +45,6 @@ from app.advanced import (  # noqa: E402
     trade_ideas,
     what_if,
 )
-from app.demo import demo_league  # noqa: E402
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
 from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSettings, snake_next_pick  # noqa: E402
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
@@ -84,7 +83,7 @@ from ui.navigation import render_navigation  # noqa: E402
 from ui.styles import inject_global_styles  # noqa: E402
 
 
-LEAGUE_RE = re.compile(r"^(demo|[0-9]{1,30})$")
+LEAGUE_RE = re.compile(r"^[0-9]{1,30}$")
 TEAM_RE = re.compile(r"^[0-9]{1,10}$")
 
 
@@ -101,11 +100,11 @@ def load_safe_config() -> None:
 def ensure_state() -> None:
     load_safe_config()
     if "league" not in st.session_state:
-        st.session_state.league = demo_league()
+        st.session_state.league = None
     if "league_connected" not in st.session_state:
         st.session_state.league_connected = False
     if "mode" not in st.session_state:
-        st.session_state.mode = "demo"
+        st.session_state.mode = "disconnected"
     if "draft_picks" not in st.session_state:
         st.session_state.draft_picks = []
     if "draft_slot" not in st.session_state:
@@ -125,7 +124,7 @@ def ensure_state() -> None:
 
 
 def league_label(league) -> str:
-    return "DEMO PREVIEW" if league.id == "demo" else "LIVE ESPN DATA"
+    return "LIVE ESPN DATA"
 
 
 def pct(value: float) -> str:
@@ -262,17 +261,9 @@ def connect_error(exc: Exception) -> str:
 def page_home(league) -> None:
     if not st.session_state.get("league_connected"):
         stadium_hero()
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Connect ESPN League", type="primary", use_container_width=True):
-                st.session_state.pending_page = "Settings"
-                st.rerun()
-        with c2:
-            if st.button("Preview Demo (Optional)", use_container_width=True):
-                st.session_state.league = demo_league()
-                st.session_state.mode = "demo"
-                st.session_state.league_connected = True
-                st.rerun()
+        if st.button("Connect ESPN League", type="primary", use_container_width=True):
+            st.session_state.pending_page = "Settings"
+            st.rerun()
         warning_state(
             "Private leagues are supported",
             "Use the private-league section in Settings. Credentials are used only for the current connection and are not saved by Fourth Down.",
@@ -309,7 +300,7 @@ def page_home(league) -> None:
 
 def page_connect() -> None:
     st.header("Connect League")
-    st.write("Use `demo` or a numeric ESPN league ID. Private leagues require both ESPN browser-cookie values.")
+    st.write("Enter a numeric ESPN league ID. Private leagues require both ESPN browser-cookie values.")
     with st.form("connect", clear_on_submit=True):
         league_id = st.text_input("League ID", value="")
         season = st.number_input("Season", min_value=2020, max_value=2030, value=2026, step=1)
@@ -336,7 +327,7 @@ def page_connect() -> None:
         league_id = league_id.strip()
         team_id = team_id.strip()
         if not LEAGUE_RE.match(league_id):
-            st.error("League ID must be `demo` or 1 to 30 digits.")
+            st.error("League ID must be 1 to 30 digits.")
             return
         if team_id and not TEAM_RE.match(team_id):
             st.error("Team ID must be 1 to 10 digits.")
@@ -353,7 +344,7 @@ def page_connect() -> None:
                     )
                 )
             st.session_state.league = league
-            st.session_state.mode = "demo" if league.id == "demo" else "live"
+            st.session_state.mode = "live"
             st.session_state.league_connected = True
             st.session_state.draft_picks = []
             st.session_state.playoff_scenarios = []
@@ -363,8 +354,8 @@ def page_connect() -> None:
         except Exception as exc:
             st.error(connect_error(exc))
     if st.button("Disconnect league"):
-        st.session_state.league = demo_league()
-        st.session_state.mode = "demo"
+        st.session_state.league = None
+        st.session_state.mode = "disconnected"
         st.session_state.league_connected = False
         st.session_state.draft_picks = []
         st.session_state.playoff_scenarios = []
@@ -586,9 +577,9 @@ def page_draft_intelligence(league) -> None:
     settings = draft_settings_from_state(league)
     drafted = {pick["player_id"] for pick in st.session_state.draft_picks}
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted)
-    st.caption("Fixture ADP and fixture draft model artifacts validate the architecture. Production ADP is unavailable until a legal source is configured.")
+    st.caption("Uses only the connected ESPN player pool, ESPN ADP, ESPN rankings, and ESPN season projections.")
     if not board:
-        st.info("No remaining QB/RB/WR/TE players are available for draft intelligence.")
+        st.info("ESPN did not provide both ADP and a season projection for any remaining QB/RB/WR/TE player, so no draft recommendation is shown.")
         return
     st.dataframe(
         [
@@ -597,12 +588,12 @@ def page_draft_intelligence(league) -> None:
                 "Player": row["player_name"],
                 "Pos": row["position"],
                 "Team": row["team"],
-                "ADP": row["consensus_adp"],
+                "ESPN ADP": row["consensus_adp"],
+                "ESPN Rank": row.get("espn_rank"),
+                "Season Projection": row.get("season_projection"),
                 "Expected VOR": row["expected_vor"],
                 "ADP Value": row.get("adp_relative_value", "fallback"),
-                "Outperform": pct(row.get("outperform_probability", 0)),
-                "Underperform": pct(row.get("underperform_probability", 0)),
-                "Avail Next": pct(row.get("available_next_pick_probability", 0)),
+                "% Rostered": row.get("percent_owned"),
                 "Confidence": row.get("confidence", "fallback"),
             }
             for row in board
@@ -613,16 +604,13 @@ def page_draft_intelligence(league) -> None:
     selected = st.selectbox("Player detail", board, format_func=lambda row: f"{row['player_name']} ({row['position']})")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Expected VOR", selected["expected_vor"])
-    c2.metric("ADP Expectation", selected.get("expected_value_at_adp", "n/a"))
+    c2.metric("Season Projection", selected.get("season_projection", "n/a"))
     c3.metric("ADP Value", selected.get("adp_relative_value", "n/a"))
-    c4.metric("Available Next Pick", pct(selected.get("available_next_pick_probability", 0)))
-    st.write(f"Availability method: {selected.get('availability_method', 'fallback')}")
-    st.write(f"Performance risk: {selected.get('performance_risk', 'n/a')}")
-    st.write(f"Availability risk: {selected.get('availability_risk', 'n/a')}")
+    c4.metric("ESPN ADP", selected.get("consensus_adp", "n/a"))
     st.write("Explanation")
     st.write("- Expected VOR compares modeled season value with league replacement level.")
-    st.write("- ADP-relative value compares expected VOR with historical fixture expectation at the player's draft cost.")
-    st.write("- Outperform/meet/underperform probabilities are fixture-calibrated summaries, not production probabilities.")
+    st.write("- ADP-relative value compares ESPN's season projection with the live ESPN player pool's replacement level and draft cost.")
+    st.write("- No next-pick probability is shown because ESPN does not provide a live probability that a player survives to your next pick.")
 
 
 def page_draft_room(league) -> None:
@@ -1011,7 +999,7 @@ def page_players(league) -> None:
             metric_card("Market Context", "Available" if market.available else "Unavailable", market.metadata.data_quality, "purple"),
         ]
     )
-    tabs = st.tabs(["Decision View", "Projection", "Market/Draft", "History", "Model Details"])
+    tabs = st.tabs(["Decision View", "Projection", "Market/Draft", "Model Details"])
     with tabs[0]:
         add_relevance = "Free agent" if not selected.rostered else "Rostered"
         st.write(f"{selected.name} is currently marked as **{add_relevance}**.")
@@ -1052,11 +1040,8 @@ def page_players(league) -> None:
             else:
                 st.info("No draft-market row is available for this player.")
         else:
-            st.info("Draft-market intelligence currently supports QB/RB/WR/TE fixture artifacts.")
+            st.info("Draft intelligence currently supports QB/RB/WR/TE when ESPN supplies live ADP and season projections.")
     with tabs[3]:
-        st.info(data["historical_note"])
-        page_historical_draft_explorer()
-    with tabs[4]:
         st.write(f"Model: `{projection.model_name}` `{projection.model_version}`")
         st.write(f"Training cutoff: {projection.training_cutoff or 'Unavailable'}")
         for item in projection.reasons + projection.limitations:
@@ -1084,15 +1069,11 @@ def page_league(league) -> None:
 def page_draft_context(league) -> None:
     st.header("Draft")
     st.caption("Contextual draft workspace. Disable draft mode in Settings after the draft.")
-    tabs = st.tabs(["Board", "Room", "Market", "Performance"])
+    tabs = st.tabs(["Board", "Room"])
     with tabs[0]:
         page_draft_intelligence(league)
     with tabs[1]:
         page_draft_room(league)
-    with tabs[2]:
-        page_market_movement()
-    with tabs[3]:
-        page_draft_model_performance()
 
 
 def page_settings(league) -> None:
@@ -1200,7 +1181,7 @@ def page_settings(league) -> None:
             st.info("No recommendations have been recorded in this local decision journal yet.")
     with tabs[7]:
         st.subheader("Safe Feedback")
-        st.write("Open a GitHub issue with the feature involved, expected behavior, actual behavior, safe error code, app version, and whether demo or live mode was used.")
+        st.write("Open a GitHub issue with the feature involved, expected behavior, actual behavior, safe error code, and app version.")
         st.warning("Do not include ESPN cookies, API keys, private league screenshots, personal information, or full provider responses.")
         st.link_button("Open GitHub Issues", "https://github.com/aayushjain1230/fantasy_football_predicter/issues")
 
@@ -1208,7 +1189,7 @@ def page_settings(league) -> None:
 def page_data_sources(league) -> None:
     section_header("Provider Freshness", "Provider state, use, impact, and unavailable behavior.")
     rows = []
-    for s in statuses(league.id == "demo"):
+    for s in statuses(False):
         rows.append(
             {
                 "Provider": s.provider,
@@ -1230,10 +1211,7 @@ def page_trust() -> None:
     if summary.status == "UNAVAILABLE":
         st.warning(summary.verdict)
         st.write(f"Current real sample size: {summary.sample_size}. Minimum before reporting metrics: {summary.minimum_sample}.")
-        demo = calibration_summary(demo_example=True)
-        st.subheader("Demo Example Only")
-        st.caption("These values demonstrate the interface and are not evidence of model accuracy.")
-        st.dataframe(demo.buckets, hide_index=True, use_container_width=True)
+        st.info("Accuracy metrics appear only after enough real predictions and real outcomes are recorded. No example data is substituted.")
         return
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Sample", summary.sample_size)
@@ -1257,7 +1235,7 @@ def page_methodology() -> None:
     st.write("- Waivers and trades compare full legal lineups before and after the move.")
     st.write("- League outlook and playoff probabilities use normalized scheduled matchups when a schedule is available.")
     st.write("- Schedule-aware outputs are Monte Carlo estimates with separate mathematical status where exact enumeration is small enough.")
-    st.write("- Phase 4 still does not add an LLM, automatic ESPN transactions, dynasty tools, or social features.")
+    st.write("- Fourth Down does not add an LLM, automatic ESPN transactions, dynasty tools, or social features.")
 
 
 def page_privacy() -> None:

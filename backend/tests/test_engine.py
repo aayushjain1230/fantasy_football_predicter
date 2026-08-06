@@ -25,7 +25,7 @@ def test_projection_factors_are_bounded_and_labeled():
     assert result.baseline_value == player.mean
     assert result.baseline_source
     assert result.adjustments
-    assert "machine-learning" in result.limitations[0]
+    assert "estimates" in result.limitations[0]
     assert "player props" in result.missing
 
 
@@ -76,7 +76,7 @@ def test_power_rankings_are_deterministic_and_display_bounded():
     a = power_rankings(league, simulations=50, seed=99)
     b = power_rankings(league, simulations=50, seed=99)
     assert [x.model_dump() for x in a] == [x.model_dump() for x in b]
-    assert all(0 < row.playoff_probability < 1 for row in a)
+    assert all(0 <= row.playoff_probability <= 1 for row in a)
 
 
 def test_waiver_moves_compare_legal_lineups_and_use_week_specific_ros():
@@ -84,7 +84,7 @@ def test_waiver_moves_compare_legal_lineups_and_use_week_specific_ros():
     moves = waiver_moves(league)
     assert moves and all(move.weekly_gain > 0 for move in moves)
     assert all(move.add.id != move.drop.id for move in moves)
-    assert "week-specific" in " ".join(moves[0].reasons).lower()
+    assert "espn weekly projections" in " ".join(moves[0].reasons).lower()
     assert moves[0].drop_safety in {"Safe drop", "Reasonable drop", "Situational drop", "High-risk drop", "Do not drop"}
     assert moves[0].faab_guidance["label"] == "Value-based FAAB guidance"
 

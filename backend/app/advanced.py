@@ -65,6 +65,8 @@ def evaluate_trade(league: League, send_ids: list[str], receive_ids: list[str], 
     receive = [p for p in opponent.players if p.id in receive_ids]
     if not send or not receive:
         raise ValueError("Select at least one player from each team")
+    if any(not player.projection_available for player in send + receive):
+        raise ValueError("ESPN did not provide a projection for every selected player, so this trade cannot be evaluated honestly.")
     after_players = [p for p in team.players if p.id not in send_ids] + receive
     required_drop = None
     if len(after_players) > len(team.players):
@@ -86,8 +88,8 @@ def trade_ideas(league: League) -> list[TradeResult]:
     team = user_team(league)
     ideas = []
     for opponent in [t for t in league.teams if t.id != team.id]:
-        sends = sorted(team.players, key=lambda p: p.mean)[-5:]
-        receives = sorted(opponent.players, key=lambda p: p.mean, reverse=True)[:5]
+        sends = sorted((p for p in team.players if p.projection_available), key=lambda p: p.mean)[-5:]
+        receives = sorted((p for p in opponent.players if p.projection_available), key=lambda p: p.mean, reverse=True)[:5]
         for send, receive in itertools.product(sends, receives):
             if send.position != receive.position and "FLEX" not in send.eligible_slots.intersection(receive.eligible_slots):
                 continue
@@ -111,11 +113,7 @@ def what_if(league: League, remove_id: str, add_id: str) -> dict:
 
 
 def _display_probability(value: float) -> float:
-    if value <= 0:
-        return 0.001
-    if value >= 1:
-        return 0.999
-    return value
+    return max(0.0, min(1.0, value))
 
 
 def power_rankings(league: League, simulations: int = 4000, seed: int = 31) -> list[TeamStrength]:
@@ -180,7 +178,7 @@ def report_csv(league: League) -> str:
     from .simulation import MODEL_VERSION
 
     stream = io.StringIO(); writer = csv.writer(stream)
-    label = "DEMO DATA" if league.id == "demo" else "SESSION LEAGUE DATA"
+    label = "LIVE ESPN SESSION DATA"
     writer.writerow([safe_csv_value(x) for x in export_metadata(label, league.season, league.week, MODEL_VERSION)])
     writer.writerow(["Fourth Down weekly report", safe_csv_value(league.name), f"Week {league.week}", label])
     writer.writerow(["Team", "Expected points", "Win probability", "Floor", "Ceiling"])

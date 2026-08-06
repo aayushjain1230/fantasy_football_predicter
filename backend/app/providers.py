@@ -7,8 +7,34 @@ from datetime import UTC, datetime
 import httpx
 
 from .config import CONFIG
-from .demo import demo_league
 from .domain import DataState, League, LeagueRuleSet, Matchup, ProviderStatus
+
+
+def _espn_player_values(source: dict, current_period: int) -> dict[str, float | int | None]:
+    weekly_projection: float | None = None
+    season_projection: float | None = None
+    for stat in source.get("stats", []):
+        if stat.get("statSourceId") != 1:
+            continue
+        value = float(stat.get("appliedTotal", 0) or 0)
+        period = int(stat.get("scoringPeriodId", -1) or -1)
+        if period == current_period and value > 0:
+            weekly_projection = max(weekly_projection or 0, value)
+        if period == 0 and value > 0:
+            season_projection = max(season_projection or 0, value)
+    ownership = source.get("ownership") or {}
+    adp = ownership.get("averageDraftPosition")
+    percent_owned = ownership.get("percentOwned")
+    rank_types = source.get("draftRanksByRankType") or {}
+    rank_row = rank_types.get("PPR") or rank_types.get("STANDARD") or {}
+    rank = rank_row.get("rank")
+    return {
+        "weekly_projection": weekly_projection,
+        "season_projection": season_projection,
+        "average_draft_position": float(adp) if adp not in (None, 0, 0.0) else None,
+        "percent_owned": float(percent_owned) if percent_owned is not None else None,
+        "espn_rank": int(rank) if rank not in (None, 0) else None,
+    }
 
 
 async def connect_espn(
@@ -19,7 +45,6 @@ async def connect_espn(
     espn_s2: str | None = None,
     espn_swid: str | None = None,
 ) -> League:
-    if league_id == "demo": return demo_league()
     supplied_s2 = (espn_s2 or "").strip()
     supplied_swid = (espn_swid or "").strip()
     if bool(supplied_s2) != bool(supplied_swid):
@@ -56,18 +81,14 @@ async def connect_espn(
             source = entry.get("playerPoolEntry", {}).get("player", {})
             position = position_map.get(source.get("defaultPositionId"))
             if not position: continue
-            weekly_projection = 0.0
-            weekly_actual = 0.0
-            for stat in source.get("stats", []):
-                if int(stat.get("scoringPeriodId", -1)) != int(raw.get("scoringPeriodId", 1)): continue
-                if stat.get("statSourceId") == 1: weekly_projection = max(weekly_projection, float(stat.get("appliedTotal", 0) or 0))
-                if stat.get("statSourceId") == 0: weekly_actual = max(weekly_actual, float(stat.get("appliedTotal", 0) or 0))
-            mean = weekly_projection or weekly_actual or 6.0
+            values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)))
+            weekly_projection = values["weekly_projection"]
+            mean = float(weekly_projection or 0)
             eligible = {position}
             if position in {"RB","WR","TE"}: eligible.add("FLEX")
             if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
             injury = str(source.get("injuryStatus", "ACTIVE")).replace("_", " ")
-            players.append(__import__('app.domain',fromlist=['Player']).Player(id=str(source.get("id")),name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,mean),stdev=max(2.5,mean*.32),availability=.7 if injury in {"QUESTIONABLE","DOUBTFUL"} else 0 if injury in {"OUT","INJURY RESERVE"} else 1,injury_status=injury,rostered=True))
+            players.append(__import__('app.domain',fromlist=['Player']).Player(id=str(source.get("id")),name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,mean),stdev=max(.1,mean*.32),availability=.7 if injury in {"QUESTIONABLE","DOUBTFUL"} else 0 if injury in {"OUT","INJURY RESERVE"} else 1,injury_status=injury,rostered=True,projection_available=weekly_projection is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"]))
         overall = t.get("record", {}).get("overall", {})
         wins = float(overall.get("wins", 0) or 0)
         losses = float(overall.get("losses", 0) or 0)
@@ -87,14 +108,12 @@ async def connect_espn(
             source=item.get("player",{})
             pid=str(source.get("id")); position=position_map.get(source.get("defaultPositionId"))
             if not position or pid in rostered: continue
-            projected=0.0
-            for stat in source.get("stats",[]):
-                if int(stat.get("scoringPeriodId",-1))==int(raw.get("scoringPeriodId",1)) and stat.get("statSourceId")==1:
-                    projected=max(projected,float(stat.get("appliedTotal",0) or 0))
+            values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)))
+            projected = values["weekly_projection"]
             eligible={position}
             if position in {"RB","WR","TE"}: eligible.add("FLEX")
             if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
-            free_agents.append(__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,projected or 4.0),stdev=max(2.5,(projected or 4.0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=False))
+            free_agents.append(__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,float(projected or 0)),stdev=max(.1,float(projected or 0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=False,projection_available=projected is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"]))
     except httpx.HTTPError:
         free_agents=[]
     scoring_items=settings.get("scoringSettings",{}).get("scoringItems",[])
@@ -125,18 +144,18 @@ async def connect_espn(
     if schedule_settings.get("matchupPeriodLength") not in (None, 1):
         unsupported.append("Nonstandard regular-season matchup period length is preserved but not fully supported.")
     if schedule_settings.get("playoffMatchupPeriodLength") not in (None, 1):
-        assumptions.append("Multi-week playoff length is preserved for display; Phase 4 simulator treats supported fixture playoffs as one scoring period per round unless raw settings are clear.")
+        assumptions.append("Multi-week playoff length is preserved for display; the simulator treats supported playoffs as one scoring period per round unless ESPN's raw settings clearly specify otherwise.")
     rules = LeagueRuleSet(regular_season_start=1, regular_season_end=regular_season_end, playoff_start=regular_season_end + 1, playoff_end=int(schedule_settings.get("playoffMatchupPeriodCount", regular_season_end + 3) or regular_season_end + 3), playoff_matchup_period_length=int(schedule_settings.get("playoffMatchupPeriodLength", 1) or 1), first_round_byes=first_byes, tiebreaker="record_then_points_for", reseeding="fixed", unsupported=unsupported, assumptions=assumptions, raw=schedule_settings)
     return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=settings)
 
 
-def statuses(demo: bool = True) -> list[ProviderStatus]:
+def statuses(demo: bool = False) -> list[ProviderStatus]:
     from .persistence import cache_get
     now = datetime.now(UTC).isoformat()
     odds_cache = cache_get("odds:nfl")
     return [
-        ProviderStatus(provider="ESPN", category="League data", state=DataState.DEMO if demo else DataState.LIVE, updated=now if not demo else None, used_by=["rosters","lineup slots","baseline projections","free agents"], impact="Clearly labeled sample league" if demo else "Roster, scoring, lineup slots, and baseline projections were loaded for this session", unavailable_behavior="Demo mode remains available; private leagues require session-only espn_s2 and SWID credentials."),
-        ProviderStatus(provider="The Odds API", category="Vegas game lines", state=DataState(odds_cache["status"]) if odds_cache else DataState.UNAVAILABLE, updated=odds_cache["fetched_at"] if odds_cache else None, key_configured=bool(CONFIG.odds_api_key), used_by=["bounded projection adjustment"], impact="Cached game totals can modestly adjust projections" if odds_cache else "No market adjustment is applied", unavailable_behavior="Projection uses the ESPN/demo baseline and marks game markets as missing."),
+        ProviderStatus(provider="ESPN", category="League data", state=DataState.LIVE, updated=now, used_by=["rosters","opponent rosters","lineup slots","weekly projections","season projections","ADP","free agents"], impact="Roster, scoring, lineup slots, projections, draft context, and free agents were loaded for this session", unavailable_behavior="The affected recommendation is unavailable; private leagues require session-only espn_s2 and SWID credentials."),
+        ProviderStatus(provider="The Odds API", category="Vegas game lines", state=DataState(odds_cache["status"]) if odds_cache else DataState.UNAVAILABLE, updated=odds_cache["fetched_at"] if odds_cache else None, key_configured=bool(CONFIG.odds_api_key), used_by=["bounded projection adjustment"], impact="Cached game totals can modestly adjust projections" if odds_cache else "No market adjustment is applied", unavailable_behavior="Projection uses the ESPN baseline and marks game markets as missing."),
         ProviderStatus(provider="Open-Meteo", category="Weather", state=DataState.UNAVAILABLE, key_configured=False, used_by=["bounded projection adjustment when explicitly refreshed"], impact="Not refreshed for this session", unavailable_behavior="No weather adjustment is applied and stadium weather is marked missing."),
         ProviderStatus(provider="nflverse", category="Open NFL roster data", state=DataState.UNAVAILABLE, key_configured=False, used_by=[], impact="Downloaded data is not yet parsed into projections in Phase 1", unavailable_behavior="No usage or injury adjustment is made from nflverse."),
         ProviderStatus(provider="Player props", category="Player markets", state=DataState.UNAVAILABLE, key_configured=False, used_by=[], impact="Not integrated in Phase 1", unavailable_behavior="Player prop inputs are listed as missing and confidence is reduced."),

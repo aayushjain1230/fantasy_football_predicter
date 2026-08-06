@@ -32,6 +32,12 @@ class Player(BaseModel):
     availability: float = Field(default=1, ge=0, le=1)
     injury_status: str = "HEALTHY"
     rostered: bool = True
+    projection_available: bool = True
+    projection_source: str = "Unspecified"
+    season_projection: float | None = None
+    average_draft_position: float | None = None
+    percent_owned: float | None = None
+    espn_rank: int | None = None
 
 
 class Team(BaseModel):

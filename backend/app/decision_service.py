@@ -140,7 +140,7 @@ def _waiver_decisions(league: League) -> list[DecisionRecommendation]:
                 deadline="Before waivers clear",
                 reasons=move.reasons[:2],
                 risks=move.risks[:2],
-                missing_inputs=["Market bid history", "True rest-of-season role"] if league.id == "demo" else ["Market bid history"],
+                missing_inputs=["Market bid history"],
                 details={
                     "open_feature": "Waivers",
                     "add_id": move.add.id,
