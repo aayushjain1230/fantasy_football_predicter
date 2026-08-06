@@ -1,10 +1,17 @@
 from __future__ import annotations
 import hashlib, os, secrets, threading, time
 from collections import defaultdict, deque
+from typing import Any
 from urllib.parse import urlparse
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+
+try:
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+    from starlette.middleware.base import BaseHTTPMiddleware
+except ModuleNotFoundError:  # Streamlit deploys do not install the optional API stack.
+    Request = Any
+    JSONResponse = None
+    BaseHTTPMiddleware = object
 from .errors import error_payload
 from .config import CONFIG
 
@@ -36,6 +43,8 @@ def allow_streamlit_action(client_key: str, bucket: str, limit: int, window: int
     return LIMITER.allow(f"streamlit:{client_key}:{safe_bucket}", limit, window)
 class SecurityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self,request:Request,call_next):
+        if JSONResponse is None:
+            raise RuntimeError("Install the backend requirements before starting the FastAPI service.")
         length=request.headers.get("content-length")
         if length and length.isdigit() and int(length)>MAX_BODY_BYTES:return JSONResponse(error_payload("REQUEST_TOO_LARGE","That request is too large.","Use a smaller input and try again."),413)
         if request.method not in SAFE_METHODS:
