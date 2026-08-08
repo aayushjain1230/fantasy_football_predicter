@@ -10,6 +10,7 @@ from app.draft_intelligence import (
     classify_residual,
     consensus_adp,
     fit_outcome_thresholds,
+    league_draft_type,
     load_csv,
     snake_next_pick,
     train_draft_artifact,
@@ -52,6 +53,9 @@ def test_snake_next_pick_odd_and_even_rounds():
     assert snake_next_pick(current_pick=1, draft_slot=6, league_size=12) == 6
     assert snake_next_pick(current_pick=6, draft_slot=6, league_size=12) == 19
     assert snake_next_pick(current_pick=19, draft_slot=6, league_size=12) == 30
+    assert snake_next_pick(current_pick=0, draft_slot=12, league_size=12) == 12
+    assert snake_next_pick(current_pick=12, draft_slot=12, league_size=12) == 13
+    assert snake_next_pick(current_pick=13, draft_slot=12, league_size=12) == 36
 
 
 def test_availability_estimate_is_monotonic():
@@ -112,6 +116,21 @@ def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):
     assert all("ESPN ADP" in row["recommendation_reason"] for row in plan)
 
 
+def test_draft_strategy_changes_scoring_and_is_explained(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 9)
+        player.season_projection = player.mean * 14
+    service = DraftIntelligenceService(tmp_path)
+    settings = DraftSettings(league_size=len(league.teams), current_pick=1, next_pick=8)
+    safe = service.pick_plan(league, settings, set(), [], strategy="safe")
+    aggressive = service.pick_plan(league, settings, set(), [], strategy="aggressive")
+    assert safe and aggressive
+    assert all(row["strategy"] == "safe" for row in safe)
+    assert all(row["strategy"] == "aggressive" for row in aggressive)
+    assert [row["pick_score"] for row in safe] != [row["pick_score"] for row in aggressive]
+
+
 def test_draft_insights_are_roster_and_pick_aware(tmp_path):
     league = demo_league()
     for index, player in enumerate(league.free_agents, 1):
@@ -149,6 +168,24 @@ def test_overall_pick_plan_maps_targets_to_snake_slot(tmp_path):
     assert [row["overall_pick"] for row in plan] == [2, 7, 10][: len(plan)]
     assert len({row["player_id"] for row in plan}) == len(plan)
     assert all(len(row["backups"]) <= 3 for row in plan)
+
+
+def test_last_slot_overall_plan_keeps_back_to_back_turn(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 5)
+        player.season_projection = player.mean * 14
+    last_slot = len(league.teams)
+    plan = DraftIntelligenceService(tmp_path).overall_pick_plan(league, draft_slot=last_slot, rounds=2)
+    assert [row["overall_pick"] for row in plan] == [last_slot, last_slot + 1]
+
+
+def test_league_draft_type_uses_espn_settings():
+    league = demo_league()
+    league.raw_settings = {"draftSettings": {"type": "SNAKE"}}
+    assert league_draft_type(league) == "snake"
+    league.raw_settings = {"draftSettings": {"type": "AUCTION"}}
+    assert league_draft_type(league) == "auction"
 
 
 def test_drafted_players_are_removed(tmp_path):
