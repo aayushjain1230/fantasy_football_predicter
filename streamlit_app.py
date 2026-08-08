@@ -247,6 +247,24 @@ def draft_state_rows(state: DraftState) -> list[dict]:
     ]
 
 
+def render_draft_pool_diagnostics(league) -> None:
+    diagnostics = league.raw_settings.get("_draft_pool_diagnostics", {})
+    if not diagnostics:
+        st.error("This session predates draft-pool diagnostics. Disconnect and reconnect the league with season 2026.")
+        return
+    status = diagnostics.get("status", "UNAVAILABLE")
+    raw_count = int(diagnostics.get("raw_player_count", 0) or 0)
+    normalized_count = int(diagnostics.get("normalized_player_count", 0) or 0)
+    if status == "UNAVAILABLE":
+        st.error("The league connected, but all ESPN draft-player requests failed. Your league data was preserved; recommendations are unavailable until ESPN returns the player pool.")
+    elif status == "INVALID":
+        st.error(f"ESPN returned {raw_count} raw player records, but none could be normalized into supported fantasy players.")
+    else:
+        st.warning(f"ESPN pool status: {status}. Raw players: {raw_count}; normalized players: {normalized_count}.")
+    with st.expander("ESPN draft-pool diagnostics"):
+        st.json({"status": status, "raw_player_count": raw_count, "normalized_player_count": normalized_count, "rejected": diagnostics.get("rejected", {}), "attempts": diagnostics.get("attempts", [])})
+
+
 def render_shell_style() -> None:
     inject_global_styles()
 
@@ -474,6 +492,8 @@ def page_connect() -> None:
             st.session_state.playoff_scenario_history = []
             st.session_state.simulation_cache = {}
             st.success(f"Connected to {league.name}.")
+            if league.raw_settings.get("_draft_pool_diagnostics", {}).get("status") != "LIVE":
+                st.warning("The league connected, but ESPN's draft-player pool is unavailable. Open Draft to see safe request and normalization counts.")
         except Exception as exc:
             st.error(connect_error(exc))
     if st.button("Disconnect league"):
@@ -717,7 +737,10 @@ def page_draft_intelligence(league) -> None:
     st.caption("Uses the connected ESPN draft pool, ESPN ADP when available, ESPN draft rank, and ESPN season projections when available.")
     if not board:
         pool = league.draft_pool or league.free_agents
-        st.info(f"ESPN returned {len(pool)} draft-pool players, but none of the remaining QB/RB/WR/TE players had ADP, draft rank, season projection, or ownership data. Sync or reconnect shortly before the draft so ESPN's current player signals can be loaded.")
+        if not pool:
+            render_draft_pool_diagnostics(league)
+        else:
+            st.info(f"ESPN returned {len(pool)} normalized draft-pool players, but none of the remaining QB/RB/WR/TE players had ADP, draft rank, season projection, or ownership data.")
         return
     if draft_type != "snake":
         st.warning(f"ESPN reports a {draft_type} draft. A snake pick-number plan would be inaccurate, so Fourth Down is showing the overall board instead.")
@@ -883,7 +906,10 @@ def page_draft_room(league) -> None:
             )
     else:
         pool = league.draft_pool or league.free_agents
-        st.info(f"No recommendation is available from the {len(pool)} ESPN draft-pool players because the remaining players lack ADP, draft rank, season projection, and ownership signals.")
+        if not pool:
+            render_draft_pool_diagnostics(league)
+        else:
+            st.info(f"No recommendation is available from the {len(pool)} normalized ESPN draft-pool players because the remaining players lack ADP, draft rank, season projection, and ownership signals.")
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted_ids)
     if board:
         pick = st.selectbox("Player selected at this overall pick", board, format_func=lambda row: f"{row['player_name']} ({row['position']}, {row['team']})")

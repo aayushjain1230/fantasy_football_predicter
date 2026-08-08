@@ -112,6 +112,7 @@ def test_public_espn_response_normalization(monkeypatch):
     assert draft_filter["limit"] == 1500
     assert "filterStatus" not in draft_filter
     assert "sortDraftRanks" in draft_filter
+    assert pool_call["params"]["scoringPeriodId"] == 0
 
 
 def test_espn_draft_rank_is_parsed_when_adp_and_projection_are_missing():
@@ -194,14 +195,36 @@ def test_player_pool_retries_with_bounded_fallback(monkeypatch):
     assert league.draft_pool
 
 
-def test_player_pool_failure_is_exposed_not_converted_to_empty(monkeypatch):
+def test_player_pool_failure_preserves_league_and_exposes_diagnostics(monkeypatch):
     class FailedPoolClient(FakeClient):
         async def get(self, url, params=None, headers=None):
             return FakeResponse({}, 500) if headers else FakeResponse(league_fixture())
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", FailedPoolClient)
-    with pytest.raises(ValueError, match="ESPN_PLAYER_POOL_UNAVAILABLE"):
-        asyncio.run(providers.connect_espn("123", 2026))
+    league = asyncio.run(providers.connect_espn("123", 2026))
+    assert league.name == "Public League"
+    assert league.draft_pool == []
+    diagnostics = league.raw_settings["_draft_pool_diagnostics"]
+    assert diagnostics["status"] == "UNAVAILABLE"
+    assert diagnostics["raw_player_count"] == 0
+    assert diagnostics["normalized_player_count"] == 0
+    assert len(diagnostics["attempts"]) == 3
+
+
+def test_nested_player_pool_entry_shape_is_normalized(monkeypatch):
+    class NestedPoolClient(FakeClient):
+        async def get(self, url, params=None, headers=None):
+            if headers:
+                return FakeResponse({"players": [{"playerPoolEntry": {"player": player_fixture("300", "Nested RB", 2, 2, 12)}}]})
+            return FakeResponse(league_fixture())
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", NestedPoolClient)
+    league = asyncio.run(providers.connect_espn("123", 2026))
+    assert [player.name for player in league.draft_pool] == ["Nested RB"]
+    diagnostics = league.raw_settings["_draft_pool_diagnostics"]
+    assert diagnostics["raw_player_count"] == 1
+    assert diagnostics["normalized_player_count"] == 1
+    assert diagnostics["status"] == "LIVE"
 
 
 def test_private_login_page_becomes_safe_auth_error(monkeypatch):
