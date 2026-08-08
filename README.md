@@ -227,12 +227,26 @@ These artifacts support repeatable tests only. They are not shown as live accura
 
 Draft intelligence:
 
-- ADP is ESPN's average draft position from the connected live player pool.
-- Players without both ESPN ADP and ESPN season projection are omitted rather than estimated.
-- Value rank compares ESPN season projection against the connected league's replacement level.
-- No fabricated next-pick availability probability or historical performance class is displayed.
-- Tiers are assigned from the live value ranking.
-- Draft state is stored in `st.session_state` and is not permanent storage.
+- League size, draft type, scoring, roster slots, bench/IR counts, ESPN player pool, ADP, rank, injuries, projections, and draft-detail picks come from the connected ESPN response when ESPN supplies them.
+- Draft setup lets the user correct league size (4–20), draft seat, and round count. The override drives draft order and valuation; it is not cosmetic.
+- Snake and linear ownership use deterministic round/seat functions. Auction leagues do not display owned-pick claims.
+- FLEX and SUPERFLEX are solved as shared eligible slots with exact assignment; one flexible slot is never counted as multiple required players.
+- ESPN draft rank can support a board when ADP or season projection is missing. Missing projections remain visibly missing and reduce confidence.
+- Value-over-replacement uses the connected/overridden league size and legal starter demand. Custom scoring is only fully represented when ESPN supplies compatible fantasy-point projections; raw-stat recalculation is not yet available.
+- Position tiers are created from value cliffs rather than equal-sized rank buckets.
+- Next-pick availability is a coarse, heuristic ADP/rank estimate rounded to 5-point probability increments. It is not historically calibrated; cost-of-waiting inherits that limitation.
+- Safe, Balanced, and Aggressive alter documented floor/risk, median/value, and upside/waiting weights. They may legitimately produce the same player.
+- Snake-turn pairs are jointly ranked so consecutive selections are not optimized independently.
+- ESPN draft synchronization is optional and unofficial. It works only when ESPN returns `mDraftDetail`; the manual recorder remains available.
+- Canonical draft selections prevent duplicates, advance one pick, undo exactly, require confirmation to reset, and export with spreadsheet-formula protection.
+- Draft state and refresh credentials are isolated to `st.session_state`, never written to shared SQLite, and wiped on disconnect/reset.
+- Fourth Down cannot guarantee wins, playoff qualification, or a championship.
+
+Permitted optional research sources:
+
+- nflverse may be used for licensed historical statistics and chronological model evaluation; it is not currently mixed into the live draft score.
+- Sleeper's documented public API may be used for public identity/draft-history or attention signals; trending activity must not be treated as player quality and is not currently used.
+- FantasyPros or individual analyst rankings require a licensed source or an authorized user upload. Fourth Down does not scrape or redistribute paid rankings.
 
 Test-only draft artifacts:
 

@@ -1,18 +1,29 @@
 from pathlib import Path
 
+import pytest
+
 from app.demo import demo_league
 from app.draft_intelligence import (
     OUTCOME_CLASSES,
     DraftIntelligenceService,
+    DraftSelection,
     DraftSettings,
+    DraftState,
     availability_at_next_pick,
     build_draft_dataset,
+    build_draft_configuration,
+    best_roster_assignment,
     classify_residual,
     consensus_adp,
     fit_outcome_thresholds,
     league_draft_type,
     league_team_count,
     load_csv,
+    marginal_roster_fit,
+    next_owned_pick,
+    owner_of_pick,
+    pick_for_slot,
+    picks_for_slot,
     snake_next_pick,
     train_draft_artifact,
 )
@@ -201,6 +212,102 @@ def test_configured_espn_league_size_wins_over_partial_team_list():
     assert [row["overall_pick"] for row in plan] == [12, 13]
 
 
+@pytest.mark.parametrize("league_size", [8, 10, 12, 14])
+@pytest.mark.parametrize("draft_type", ["snake", "linear"])
+def test_every_pick_has_one_owner_and_every_slot_one_pick_per_round(league_size, draft_type):
+    rounds = 20
+    all_picks = []
+    for slot in range(1, league_size + 1):
+        owned = picks_for_slot(slot, league_size, rounds, draft_type)
+        assert len(owned) == rounds
+        assert all(owner_of_pick(pick, league_size, draft_type) == slot for pick in owned)
+        all_picks.extend(owned)
+    assert sorted(all_picks) == list(range(1, league_size * rounds + 1))
+
+
+def test_snake_examples_and_turns_are_exact():
+    assert picks_for_slot(1, 12, 5, "snake") == [1, 24, 25, 48, 49]
+    assert picks_for_slot(3, 12, 5, "snake") == [3, 22, 27, 46, 51]
+    assert picks_for_slot(6, 12, 5, "snake") == [6, 19, 30, 43, 54]
+    assert picks_for_slot(10, 12, 5, "snake") == [10, 15, 34, 39, 58]
+    assert picks_for_slot(12, 12, 5, "snake") == [12, 13, 36, 37, 60]
+    assert next_owned_pick(12, 12, 12, "snake") == 12
+    assert next_owned_pick(13, 12, 12, "snake") == 13
+    assert next_owned_pick(14, 12, 12, "snake") == 36
+
+
+def test_auction_has_no_owned_pick_order():
+    assert picks_for_slot(1, 12, 20, "auction") == []
+    assert next_owned_pick(1, 1, 12, "auction") is None
+    with pytest.raises(ValueError):
+        owner_of_pick(1, 12, "auction")
+
+
+def test_flex_and_superflex_are_exact_shared_assignments():
+    flex = best_roster_assignment(["RB", "WR"], ["RB", "FLEX"])
+    assert flex["filled"] == 2
+    assert marginal_roster_fit(["RB"], "WR", ["RB", "FLEX"]) == 1
+    assert marginal_roster_fit(["RB", "WR"], "TE", ["RB", "FLEX"]) == 0
+    superflex = best_roster_assignment(["QB", "QB", "RB"], ["QB", "SUPERFLEX", "RB"])
+    assert superflex["filled"] == 3
+    assert [row["position"] for row in superflex["assignments"]].count("QB") == 2
+
+
+def test_configuration_reads_bench_scoring_and_override():
+    league = demo_league()
+    league.raw_settings = {
+        "size": 12,
+        "draftSettings": {"type": "SNAKE"},
+        "rosterSettings": {"lineupSlotCounts": {"20": 7, "21": 2}},
+        "scoringSettings": {"scoringItems": [{"statId": 53, "points": 1}]},
+    }
+    config = build_draft_configuration(league, league_size=10, draft_slot=10, total_rounds=18)
+    assert config.league_size == 10
+    assert config.bench_slots == 7
+    assert config.ir_slots == 2
+    assert config.scoring_format == "full PPR"
+    assert config.user_owned_picks[:2] == [10, 11]
+
+
+def test_canonical_state_prevents_duplicates_and_undoes_exactly():
+    config = build_draft_configuration(demo_league(), league_size=12, draft_slot=6)
+    state = DraftState(configuration=config)
+    selection = DraftSelection(overall_pick=1, round_number=1, pick_in_round=1, owner_slot=1, player_id="p1", player_name="Player", position="RB")
+    state = state.record(selection)
+    assert state.current_overall_pick == 2
+    with pytest.raises(ValueError, match="PLAYER_ALREADY_DRAFTED"):
+        state.record(selection.model_copy(update={"overall_pick": 2}))
+    restored = state.undo()
+    assert restored.selections == []
+    assert restored.current_overall_pick == 1
+
+
+def test_value_cliff_tiers_and_waiting_fields_exist(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 8)
+        player.season_projection = player.mean * 14
+    board = DraftIntelligenceService(tmp_path).current_board(league, DraftSettings(current_pick=1, next_pick=20), set())
+    assert board
+    assert all("tier_drop_after_player" in row for row in board)
+    assert all(row["availability_label"] in {"LOW", "MEDIUM", "HIGH"} for row in board)
+    assert all(0.05 <= row["availability_probability"] <= 0.95 for row in board)
+    assert all(row["cost_of_waiting"] >= 0 for row in board)
+
+
+def test_snake_turn_pair_is_jointly_ranked(tmp_path):
+    league = demo_league()
+    league.raw_settings = {"size": 4, "draftSettings": {"type": "SNAKE"}}
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 4)
+        player.season_projection = player.mean * 14
+    settings = DraftSettings(league_size=4, current_pick=4, next_pick=5, draft_type="snake")
+    pairs = DraftIntelligenceService(tmp_path).turn_pair_plan(league, settings, 4, set(), [], "balanced")
+    assert pairs
+    assert all(row["first"]["player_id"] != row["second"]["player_id"] for row in pairs)
+    assert pairs == sorted(pairs, key=lambda row: row["pair_score"], reverse=True)
+
+
 def test_drafted_players_are_removed(tmp_path):
     dataset = build_draft_dataset(load_csv(ADP), load_csv(OUTCOMES))
     train_draft_artifact(dataset, tmp_path)
@@ -208,3 +315,8 @@ def test_drafted_players_are_removed(tmp_path):
     first = league.teams[0].players[0]
     board = DraftIntelligenceService(tmp_path).current_board(league, DraftSettings(current_pick=1, next_pick=24), drafted_ids={first.id})
     assert all(row["player_id"] != first.id for row in board)
+    marginal_roster_fit,
+    next_owned_pick,
+    owner_of_pick,
+    pick_for_slot,
+    picks_for_slot,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import re
@@ -46,7 +48,7 @@ from app.advanced import (  # noqa: E402
     what_if,
 )
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
-from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSettings, league_draft_type, league_team_count, snake_next_pick  # noqa: E402
+from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSelection, DraftSettings, DraftState, build_draft_configuration, league_draft_type, league_team_count, owner_of_pick, snake_next_pick  # noqa: E402
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
 from app.providers import connect_espn, statuses  # noqa: E402
 from app.decision_service import build_weekly_brief, roster_outlook, value_based_faab  # noqa: E402
@@ -113,6 +115,10 @@ def ensure_state() -> None:
         st.session_state.draft_slot = 6
     if "draft_strategy" not in st.session_state:
         st.session_state.draft_strategy = "balanced"
+    if "draft_league_size" not in st.session_state:
+        st.session_state.draft_league_size = None
+    if "draft_rounds" not in st.session_state:
+        st.session_state.draft_rounds = 16
     if "current_pick" not in st.session_state:
         st.session_state.current_pick = 1
     if "playoff_scenarios" not in st.session_state:
@@ -169,6 +175,59 @@ def status_badge(state: str) -> str:
 def player_label(player) -> str:
     status = "" if player.injury_status in {"HEALTHY", "ACTIVE"} else f" - {player.injury_status}"
     return f"{player.name} ({player.position}, {player.team}){status}"
+
+
+def safe_draft_csv(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    fields = list(rows[0].keys())
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: "'" + str(value) if str(value).lstrip().startswith(("=", "+", "-", "@")) else value for key, value in row.items()})
+    return output.getvalue()
+
+
+def canonical_draft_state(league) -> DraftState:
+    config = build_draft_configuration(
+        league,
+        league_size=league_team_count(league),
+        draft_slot=int(st.session_state.draft_slot),
+        current_overall_pick=int(st.session_state.current_pick),
+        total_rounds=int(st.session_state.draft_rounds),
+    )
+    selections = []
+    for index, pick in enumerate(sorted(st.session_state.draft_picks, key=lambda row: int(row.get("number", 0))), 1):
+        number = int(pick.get("number") or index)
+        selections.append(DraftSelection(
+            overall_pick=number,
+            round_number=(number - 1) // config.league_size + 1,
+            pick_in_round=(number - 1) % config.league_size + 1,
+            owner_slot=int(pick.get("owner_slot") or owner_of_pick(number, config.league_size, config.draft_type)),
+            player_id=str(pick["player_id"]),
+            player_name=str(pick.get("player_name") or pick["player_id"]),
+            position=str(pick.get("position") or "UNKNOWN"),
+            source=str(pick.get("source") or "manual"),
+        ))
+    return DraftState(configuration=config, selections=selections, current_overall_pick=int(st.session_state.current_pick))
+
+
+def draft_state_rows(state: DraftState) -> list[dict]:
+    return [
+        {
+            "number": item.overall_pick,
+            "round": item.round_number,
+            "pick_in_round": item.pick_in_round,
+            "owner_slot": item.owner_slot,
+            "player_id": item.player_id,
+            "player_name": item.player_name,
+            "position": item.position,
+            "recorded_at": item.recorded_at.isoformat(),
+            "source": item.source,
+        }
+        for item in state.selections
+    ]
 
 
 def render_shell_style() -> None:
@@ -383,6 +442,9 @@ def page_connect() -> None:
             st.session_state.mode = "live"
             st.session_state.league_connected = True
             st.session_state.draft_picks = []
+            st.session_state.draft_league_size = league_team_count(league)
+            roster_counts = (league.raw_settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
+            st.session_state.draft_rounds = len(league.roster_slots) + int(roster_counts.get("20", roster_counts.get(20, 7)) or 7)
             st.session_state.playoff_scenarios = []
             st.session_state.playoff_scenario_history = []
             st.session_state.simulation_cache = {}
@@ -626,7 +688,7 @@ def page_draft_intelligence(league) -> None:
     drafted = {pick["player_id"] for pick in st.session_state.draft_picks}
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted)
     draft_type = league_draft_type(league)
-    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=10, strategy=st.session_state.draft_strategy) if draft_type == "snake" else []
+    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=min(25, int(st.session_state.draft_rounds)), strategy=st.session_state.draft_strategy) if draft_type == "snake" else []
     st.caption("Uses the connected ESPN draft pool, ESPN ADP when available, ESPN draft rank, and ESPN season projections when available.")
     if not board:
         st.info("ESPN did not return ADP or a draft rank for the remaining QB/RB/WR/TE player pool. Reconnect shortly before the draft so ESPN's current draft data can be loaded.")
@@ -712,7 +774,7 @@ def page_draft_room(league) -> None:
     round_index = (current_pick - 1) // league_size
     pick_in_round = ((current_pick - 1) % league_size) + 1
     draft_type = league_draft_type(league)
-    owner_slot = pick_in_round if draft_type != "snake" or round_index % 2 == 0 else league_size - pick_in_round + 1
+    owner_slot = owner_of_pick(current_pick, league_size, draft_type) if draft_type != "auction" else 0
     if draft_type == "auction":
         st.warning("ESPN reports an auction/salary-cap draft. Pick ownership and snake turns do not apply; recommendations are ranked nominations and values, not an overall-pick sequence.")
     drafted_ids = {pick["player_id"] for pick in st.session_state.draft_picks}
@@ -722,13 +784,27 @@ def page_draft_room(league) -> None:
     recent_positions = [pick.get("position", "UNKNOWN") for pick in st.session_state.draft_picks]
     insights = DEFAULT_DRAFT_SERVICE.draft_insights(league, settings, drafted_ids, user_positions, strategy=st.session_state.draft_strategy, recent_drafted_positions=recent_positions)
     plan = insights["best"]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("On the clock", f"Slot {owner_slot}", "Your pick" if owner_slot == int(st.session_state.draft_slot) else "Opponent pick")
-    c2.metric("Your draft slot", int(st.session_state.draft_slot))
-    c3.metric("Your next pick", current_pick if owner_slot == int(st.session_state.draft_slot) else settings.next_pick)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Round", round_index + 1, f"Pick {pick_in_round}")
+    c2.metric("Overall pick", current_pick, "Auction nomination" if draft_type == "auction" else "You are on the clock" if owner_slot == int(st.session_state.draft_slot) else f"Seat {owner_slot} on clock")
+    c3.metric("Your draft seat", f"{int(st.session_state.draft_slot)} of {league_size}")
+    next_user_pick = current_pick if owner_slot == int(st.session_state.draft_slot) else settings.next_pick
+    if draft_type == "auction":
+        c4.metric("Next owned pick", "N/A", "Auctions have nominations, not owned picks")
+    else:
+        c4.metric("Next owned pick", next_user_pick, f"{max(0, next_user_pick - current_pick)} selections away")
     if draft_type == "snake" and owner_slot == int(st.session_state.draft_slot):
         following_pick = snake_next_pick(current_pick, int(st.session_state.draft_slot), league_size)
         st.caption(f"After this selection, you pick again at overall {following_pick}." + (" You are on the snake turn and will pick twice in a row." if following_pick == current_pick + 1 else ""))
+        if following_pick == current_pick + 1:
+            pairs = DEFAULT_DRAFT_SERVICE.turn_pair_plan(league, settings, int(st.session_state.draft_slot), drafted_ids, user_positions, strategy=st.session_state.draft_strategy)
+            if pairs:
+                st.subheader(f"Optimize picks {current_pick} + {following_pick} together")
+                st.dataframe(
+                    [{"Plan": index + 1, "First pick": row["first"]["player_name"], "Second pick": row["second"]["player_name"], "Positions": f'{row["first"]["position"]} + {row["second"]["position"]}', "Why": f'{row["first"]["availability_label"]} / {row["second"]["availability_label"]} next-pick availability'} for index, row in enumerate(pairs)],
+                    hide_index=True,
+                    use_container_width=True,
+                )
     if plan:
         best = plan[0]
         if owner_slot == int(st.session_state.draft_slot):
@@ -736,6 +812,17 @@ def page_draft_room(league) -> None:
         else:
             st.info(f"Current top target for your next pick: {best['player_name']} ({best['position']}, {best['team']})")
         st.caption(best["recommendation_reason"] + " This is a decision estimate from live ESPN inputs, not a guarantee.")
+        best_value = max(plan, key=lambda row: row.get("adp_relative_value") or 0)
+        tier_priority = max(plan, key=lambda row: row.get("cost_of_waiting") or 0)
+        safer = min(plan, key=lambda row: (row.get("injury_status") not in {"ACTIVE", "HEALTHY"}, row.get("season_projection") is None, row.get("consensus_adp", 9999)))
+        upside = max(plan, key=lambda row: (row.get("expected_vor") or 0, row.get("adp_relative_value") or 0))
+        wait_candidate = max(plan, key=lambda row: row.get("availability_probability") or 0)
+        alt_a, alt_b, alt_c, alt_d = st.columns(4)
+        alt_a.metric("Best value", best_value["player_name"], f"ADP value {best_value['adp_relative_value']:+.0f}")
+        alt_b.metric("Tier priority", tier_priority["player_name"], f"Wait cost {tier_priority['cost_of_waiting']:.1f}")
+        alt_c.metric("Safer choice", safer["player_name"], safer.get("injury_status", "ACTIVE"))
+        alt_d.metric("Upside choice", upside["player_name"], f"VOR {upside.get('expected_vor') or 0:.1f}")
+        st.caption(f"Likely safer to wait on: {wait_candidate['player_name']} · {wait_candidate['availability_label']} heuristic availability at pick {settings.next_pick}.")
         st.subheader("What your roster needs next")
         st.dataframe(
             [{"Position": row["position"], "Have": row["filled"], "Starter target": row["target"], "Need": row["gap"], "Status": row["priority"]} for row in insights["needs"]],
@@ -745,7 +832,7 @@ def page_draft_room(league) -> None:
         pick_tab, sleeper_tab, strong_tab = st.tabs(["Best picks & backups", "Sleepers", "Strong players"])
         with pick_tab:
             st.dataframe(
-                [{"Order": index + 1, "Player": row["player_name"], "Pos": row["position"], "Team": row["team"], "ESPN ADP": row["consensus_adp"], "Projection": row["season_projection"], "VOR": row["expected_vor"], "Fit score": row["pick_score"], "Why": row["recommendation_reason"]} for index, row in enumerate(plan)],
+                [{"Order": index + 1, "Player": row["player_name"], "Pos": row["position"], "Team": row["team"], "ESPN ADP/rank": row["consensus_adp"], "Projection": row["season_projection"], "VOR": row["expected_vor"], "Tier": row["tier"], "Tier left": row["players_remaining_in_tier"], "Next-pick availability": row["availability_label"], "Wait cost": row["cost_of_waiting"], "Why": row["recommendation_reason"]} for index, row in enumerate(plan)],
                 hide_index=True,
                 use_container_width=True,
             )
@@ -772,20 +859,35 @@ def page_draft_room(league) -> None:
     if board:
         pick = st.selectbox("Player selected at this overall pick", board, format_func=lambda row: f"{row['player_name']} ({row['position']}, {row['team']})")
         if st.button("Record selected player", type="primary", use_container_width=True):
-            if pick["player_id"] not in {p["player_id"] for p in st.session_state.draft_picks}:
-                st.session_state.draft_picks.append({"number": current_pick, "owner_slot": owner_slot, "player_id": pick["player_id"], "player_name": pick["player_name"], "position": pick["position"]})
-                st.session_state.current_pick = int(st.session_state.current_pick) + 1
+            state = canonical_draft_state(league)
+            try:
+                state = state.record(DraftSelection(
+                    overall_pick=current_pick,
+                    round_number=round_index + 1,
+                    pick_in_round=pick_in_round,
+                    owner_slot=owner_slot,
+                    player_id=pick["player_id"],
+                    player_name=pick["player_name"],
+                    position=pick["position"],
+                    source="manual",
+                ))
+                st.session_state.draft_picks = draft_state_rows(state)
+                st.session_state.current_pick = state.current_overall_pick
                 st.rerun()
+            except ValueError as exc:
+                st.error("That player was already selected." if str(exc) == "PLAYER_ALREADY_DRAFTED" else "The selection was out of sequence. Sync or reset the draft state and try again.")
     c1, c2, c3 = st.columns(3)
     if c1.button("Undo last pick", disabled=not st.session_state.draft_picks):
-        last = st.session_state.draft_picks.pop()
-        st.session_state.current_pick = int(last["number"])
+        state = canonical_draft_state(league).undo()
+        st.session_state.draft_picks = draft_state_rows(state)
+        st.session_state.current_pick = state.current_overall_pick
         st.rerun()
-    if c2.button("Reset draft"):
+    confirm_reset = c2.checkbox("Confirm reset", value=False)
+    if c2.button("Reset draft", disabled=not confirm_reset):
         st.session_state.draft_picks = []
         st.session_state.current_pick = 1
         st.rerun()
-    c3.download_button("Export draft CSV", data="\n".join([",".join(map(str, pick.values())) for pick in st.session_state.draft_picks]), file_name="fourth-down-draft.csv", mime="text/csv")
+    c3.download_button("Export draft CSV", data=safe_draft_csv(st.session_state.draft_picks), file_name="fourth-down-draft.csv", mime="text/csv")
     st.dataframe(st.session_state.draft_picks, hide_index=True, use_container_width=True)
 
 
@@ -1218,11 +1320,24 @@ def page_league(league) -> None:
 def page_draft_context(league) -> None:
     st.header("Draft")
     st.caption("Start with your slot-based overall pick plan, then use Live Draft to recalculate after every selection.")
+    espn_size = league_team_count(league)
+    setup_size, setup_rounds = st.columns(2)
+    st.session_state.draft_league_size = setup_size.slider(
+        "Managers in draft",
+        min_value=4,
+        max_value=20,
+        value=min(20, max(4, int(st.session_state.draft_league_size or espn_size))),
+        help=f"ESPN reports {espn_size}. Change this only if ESPN is wrong or managers have not been finalized.",
+    )
+    st.session_state.draft_rounds = setup_rounds.slider("Draft rounds", min_value=1, max_value=25, value=min(25, max(1, int(st.session_state.draft_rounds))))
+    configured_settings = dict(league.raw_settings)
+    configured_settings["size"] = int(st.session_state.draft_league_size)
+    league = league.model_copy(update={"raw_settings": configured_settings})
     league_size = league_team_count(league)
     draft_type = league_draft_type(league)
     control_a, control_b, control_c = st.columns([1, 1.5, 2])
-    st.session_state.draft_slot = control_a.number_input("Your draft slot", min_value=1, max_value=league_size, value=min(int(st.session_state.draft_slot), league_size), step=1)
-    control_b.metric("ESPN draft type", draft_type.title(), f"{league_size} teams")
+    st.session_state.draft_slot = control_a.number_input("Your draft seat", min_value=1, max_value=league_size, value=min(int(st.session_state.draft_slot), league_size), step=1)
+    control_b.metric("Draft configuration", draft_type.title(), f"{league_size} managers · {st.session_state.draft_rounds} rounds")
     st.session_state.draft_strategy = control_c.radio(
         "Draft mindset",
         ["safe", "balanced", "aggressive"],
@@ -1233,6 +1348,9 @@ def page_draft_context(league) -> None:
     )
     if draft_type == "snake" and int(st.session_state.draft_slot) == league_size:
         st.info(f"Turn confirmed: slot {league_size} owns picks {league_size} and {league_size + 1}, then {league_size * 3} and {league_size * 3 + 1}.")
+    config = build_draft_configuration(league, league_size=league_size, draft_slot=int(st.session_state.draft_slot), current_overall_pick=int(st.session_state.current_pick), total_rounds=int(st.session_state.draft_rounds))
+    slot_summary = " · ".join(f"{config.starting_slots.count(slot)} {slot}" for slot in dict.fromkeys(config.starting_slots))
+    st.caption(f"{config.league_size} managers · {config.draft_type.title()} · Seat {config.draft_slot} · {config.scoring_format} · {slot_summary} · {config.bench_slots} bench")
     tabs = st.tabs(["Overall Pick Plan", "Live Draft"])
     with tabs[0]:
         page_draft_intelligence(league)
@@ -1408,7 +1526,7 @@ def page_settings(league) -> None:
         st.subheader("Session Reset")
         st.write("Reset clears Streamlit session state for league, draft, scenarios, selections, and private derived results. It does not remove data from ESPN or other providers.")
         if st.button("Reset this Streamlit session"):
-            for key in ["league", "espn_connection", "mode", "draft_picks", "draft_strategy", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection", "openweather_api_key", "openweather_connection", "decision_journal"]:
+            for key in ["league", "espn_connection", "mode", "draft_picks", "draft_strategy", "draft_league_size", "draft_rounds", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection", "openweather_api_key", "openweather_connection", "decision_journal"]:
                 st.session_state.pop(key, None)
             st.rerun()
     with tabs[6]:

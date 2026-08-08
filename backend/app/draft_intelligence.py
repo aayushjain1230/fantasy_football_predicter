@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean, median, pstdev
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from .domain import League, Player
 from .engine import user_team
@@ -28,6 +30,107 @@ class DraftSettings:
     next_pick: int = 24
     scoring_format: str = "ppr"
     draft_type: str = "snake"
+
+
+class DraftConfiguration(BaseModel):
+    league_size: int = Field(ge=4, le=20)
+    draft_type: Literal["snake", "linear", "auction"]
+    draft_slot: int | None = None
+    current_overall_pick: int = Field(default=1, ge=1)
+    total_rounds: int = Field(default=16, ge=1, le=30)
+    scoring_format: str
+    scoring_rules: dict[str, float] = Field(default_factory=dict)
+    starting_slots: list[str] = Field(default_factory=list)
+    bench_slots: int = Field(default=0, ge=0)
+    ir_slots: int = Field(default=0, ge=0)
+    flex_eligible_positions: set[str] = Field(default_factory=lambda: {"RB", "WR", "TE"})
+    superflex_eligible_positions: set[str] = Field(default_factory=lambda: {"QB", "RB", "WR", "TE"})
+    keeper_player_ids: set[str] = Field(default_factory=set)
+    keeper_costs: dict[str, int] = Field(default_factory=dict)
+    roster_limits: dict[str, int] = Field(default_factory=dict)
+    user_owned_picks: list[int] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    unsupported_settings: list[str] = Field(default_factory=list)
+    sources: dict[str, str] = Field(default_factory=dict)
+
+
+class DraftSelection(BaseModel):
+    overall_pick: int = Field(ge=1)
+    round_number: int = Field(ge=1)
+    pick_in_round: int = Field(ge=1)
+    owner_slot: int = Field(ge=1)
+    player_id: str
+    player_name: str
+    position: str
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    source: str = "manual"
+
+
+class DraftState(BaseModel):
+    configuration: DraftConfiguration
+    selections: list[DraftSelection] = Field(default_factory=list)
+    current_overall_pick: int = Field(default=1, ge=1)
+
+    @property
+    def drafted_player_ids(self) -> set[str]:
+        return {selection.player_id for selection in self.selections}
+
+    @property
+    def next_user_pick(self) -> int | None:
+        if self.configuration.draft_slot is None:
+            return None
+        return next_owned_pick(self.current_overall_pick, self.configuration.draft_slot, self.configuration.league_size, self.configuration.draft_type)
+
+    def record(self, selection: DraftSelection) -> "DraftState":
+        if selection.player_id in self.drafted_player_ids:
+            raise ValueError("PLAYER_ALREADY_DRAFTED")
+        if selection.overall_pick != self.current_overall_pick:
+            raise ValueError("PICK_OUT_OF_SEQUENCE")
+        return self.model_copy(update={"selections": [*self.selections, selection], "current_overall_pick": selection.overall_pick + 1})
+
+    def undo(self) -> "DraftState":
+        if not self.selections:
+            return self
+        return self.model_copy(update={"selections": self.selections[:-1], "current_overall_pick": self.selections[-1].overall_pick})
+
+
+SLOT_ELIGIBILITY = {
+    "QB": {"QB"}, "RB": {"RB"}, "WR": {"WR"}, "TE": {"TE"},
+    "FLEX": {"RB", "WR", "TE"}, "SUPERFLEX": {"QB", "RB", "WR", "TE"},
+    "DST": {"DST"}, "K": {"K"},
+}
+
+
+def owner_of_pick(overall_pick: int, league_size: int, draft_type: str) -> int:
+    if overall_pick < 1 or league_size < 2 or draft_type == "auction":
+        raise ValueError("pick ownership is unavailable")
+    pick_in_round = (overall_pick - 1) % league_size + 1
+    round_number = (overall_pick - 1) // league_size + 1
+    return league_size - pick_in_round + 1 if draft_type == "snake" and round_number % 2 == 0 else pick_in_round
+
+
+def pick_for_slot(round_number: int, draft_slot: int, league_size: int, draft_type: str) -> int:
+    if round_number < 1 or not 1 <= draft_slot <= league_size or draft_type == "auction":
+        raise ValueError("invalid draft order")
+    pick_in_round = league_size - draft_slot + 1 if draft_type == "snake" and round_number % 2 == 0 else draft_slot
+    return (round_number - 1) * league_size + pick_in_round
+
+
+def picks_for_slot(draft_slot: int, league_size: int, rounds: int, draft_type: str) -> list[int]:
+    if draft_type == "auction":
+        return []
+    return [pick_for_slot(round_number, draft_slot, league_size, draft_type) for round_number in range(1, rounds + 1)]
+
+
+def next_owned_pick(current_overall_pick: int, draft_slot: int, league_size: int, draft_type: str) -> int | None:
+    if draft_type == "auction":
+        return None
+    start_round = max(1, (max(1, current_overall_pick) - 1) // league_size + 1)
+    for round_number in range(start_round, start_round + 31):
+        pick = pick_for_slot(round_number, draft_slot, league_size, draft_type)
+        if pick >= current_overall_pick:
+            return pick
+    return None
 
 
 def normalize_name(name: str) -> str:
@@ -55,14 +158,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 def snake_next_pick(current_pick: int, draft_slot: int, league_size: int) -> int:
     if current_pick < 0 or draft_slot < 1 or draft_slot > league_size:
         raise ValueError("invalid draft state")
-    pick = current_pick + 1
-    while True:
-        round_index = (pick - 1) // league_size
-        pick_in_round = ((pick - 1) % league_size) + 1
-        owner_slot = pick_in_round if round_index % 2 == 0 else league_size - pick_in_round + 1
-        if owner_slot == draft_slot:
-            return pick
-        pick += 1
+    pick = next_owned_pick(current_pick + 1, draft_slot, league_size, "snake")
+    if pick is None:
+        raise ValueError("no future pick")
+    return pick
 
 
 def league_draft_type(league: League) -> str:
@@ -83,6 +182,82 @@ def league_team_count(league: League) -> int:
     except (TypeError, ValueError):
         size = len(league.teams)
     return max(2, size or len(league.teams) or 12)
+
+
+def build_draft_configuration(
+    league: League,
+    *,
+    league_size: int | None = None,
+    draft_slot: int | None = None,
+    current_overall_pick: int = 1,
+    total_rounds: int | None = None,
+    keeper_player_ids: set[str] | None = None,
+) -> DraftConfiguration:
+    settings = league.raw_settings if isinstance(league.raw_settings, dict) else {}
+    counts = (settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
+    bench = int(counts.get("20", counts.get(20, 0)) or 0)
+    ir = int(counts.get("21", counts.get(21, 0)) or 0)
+    size = min(20, max(4, int(league_size or league_team_count(league))))
+    draft_type = league_draft_type(league)
+    scoring_items = (settings.get("scoringSettings") or {}).get("scoringItems") or []
+    reception_points = next((float(item.get("points", 0) or 0) for item in scoring_items if int(item.get("statId", -1)) == 53), 0)
+    scoring_format = "full PPR" if reception_points >= 0.75 else "half PPR" if reception_points > 0 else "standard"
+    assumptions = []
+    if not counts:
+        assumptions.append("ESPN did not expose bench/IR counts; editable defaults are shown.")
+    rounds = total_rounds or max(1, len(league.roster_slots) + bench)
+    owned = picks_for_slot(draft_slot, size, rounds, draft_type) if draft_slot and draft_type != "auction" else []
+    return DraftConfiguration(
+        league_size=size,
+        draft_type=draft_type,
+        draft_slot=draft_slot,
+        current_overall_pick=current_overall_pick,
+        total_rounds=rounds,
+        scoring_format=scoring_format,
+        scoring_rules=league.scoring,
+        starting_slots=list(league.roster_slots),
+        bench_slots=bench,
+        ir_slots=ir,
+        keeper_player_ids=set(keeper_player_ids or set()),
+        user_owned_picks=owned,
+        assumptions=assumptions,
+        sources={"league_size": "ESPN settings.size", "draft_type": "ESPN draftSettings", "roster": "ESPN lineupSlotCounts", "scoring": "ESPN scoringItems"},
+    )
+
+
+def best_roster_assignment(player_positions: list[str], starting_slots: list[str]) -> dict[str, Any]:
+    """Exact maximum-cardinality assignment for fixed and flexible starter slots."""
+    ordered_slots = sorted(enumerate(starting_slots), key=lambda item: len(SLOT_ELIGIBILITY.get(item[1], {item[1]})))
+    best: list[tuple[int, int]] = []
+
+    def search(slot_index: int, used: set[int], assigned: list[tuple[int, int]]) -> None:
+        nonlocal best
+        if len(assigned) + len(ordered_slots) - slot_index <= len(best):
+            return
+        if slot_index == len(ordered_slots):
+            if len(assigned) > len(best):
+                best = list(assigned)
+            return
+        original_slot_index, slot = ordered_slots[slot_index]
+        eligible = SLOT_ELIGIBILITY.get(slot, {slot})
+        for player_index, position in enumerate(player_positions):
+            if player_index not in used and position in eligible:
+                search(slot_index + 1, used | {player_index}, [*assigned, (original_slot_index, player_index)])
+        search(slot_index + 1, used, assigned)
+
+    search(0, set(), [])
+    assigned_slots = {slot_index for slot_index, _ in best}
+    return {
+        "filled": len(best),
+        "assignments": [{"slot": starting_slots[slot_index], "position": player_positions[player_index], "player_index": player_index} for slot_index, player_index in sorted(best)],
+        "gaps": [slot for index, slot in enumerate(starting_slots) if index not in assigned_slots],
+    }
+
+
+def marginal_roster_fit(player_positions: list[str], candidate_position: str, starting_slots: list[str]) -> float:
+    before = best_roster_assignment(player_positions, starting_slots)["filled"]
+    after = best_roster_assignment([*player_positions, candidate_position], starting_slots)["filled"]
+    return float(after - before)
 
 
 def validate_adp_rows(rows: list[dict[str, Any]]) -> None:
@@ -459,7 +634,6 @@ class DraftIntelligenceService:
         for row in base_rows:
             row["value_rank"] = value_rank[row["player_id"]]
             row["adp_relative_value"] = round(row["consensus_adp"] - row["value_rank"], 2)
-            row["tier"] = 1 + (row["value_rank"] - 1) // max(1, settings.league_size)
             if row["season_projection"] is not None and row["adp_available"]:
                 row["confidence"] = "ESPN live ADP + season projection"
             elif row["season_projection"] is not None:
@@ -468,6 +642,35 @@ class DraftIntelligenceService:
                 row["confidence"] = "ESPN live draft rank; season projection unavailable"
             row["availability_method"] = "ESPN average draft position; no fabricated next-pick probability"
             row["fallback_used"] = False
+        for position in {row["position"] for row in base_rows}:
+            position_rows = sorted(
+                [row for row in base_rows if row["position"] == position],
+                key=lambda row: row["expected_vor"] if row["expected_vor"] is not None else -row["composite_rank"],
+                reverse=True,
+            )
+            values = [row["expected_vor"] if row["expected_vor"] is not None else -row["composite_rank"] for row in position_rows]
+            gaps = [max(0.0, values[index] - values[index + 1]) for index in range(len(values) - 1)]
+            typical_gap = median(gaps) if gaps else 0
+            spread = pstdev(gaps) if len(gaps) > 1 else 0
+            cliff = max(3.0 if any(row["expected_vor"] is not None for row in position_rows) else 2.0, typical_gap + spread)
+            tier = 1
+            for index, row in enumerate(position_rows):
+                row["tier"] = tier
+                row["tier_drop_after_player"] = round(gaps[index], 2) if index < len(gaps) else 0.0
+                if index < len(gaps) and gaps[index] >= cliff:
+                    tier += 1
+            tier_counts = {number: sum(1 for row in position_rows if row["tier"] == number) for number in range(1, tier + 1)}
+            for row in position_rows:
+                row["players_remaining_in_tier"] = tier_counts[row["tier"]]
+        for row in base_rows:
+            stddev = max(6.0, row["consensus_adp"] * 0.18)
+            z = (settings.next_pick - row["consensus_adp"]) / stddev
+            available = 1 - (0.5 * (1 + math.erf(z / math.sqrt(2))))
+            available = max(0.05, min(0.95, round(available / 0.05) * 0.05))
+            row["availability_probability"] = available
+            row["availability_label"] = "HIGH" if available >= 0.7 else "MEDIUM" if available >= 0.35 else "LOW"
+            row["availability_method"] = "Heuristic ADP/rank availability probability; not historically calibrated"
+            row["cost_of_waiting"] = round((1 - available) * float(row.get("tier_drop_after_player") or 0), 2)
         return sorted(base_rows, key=lambda row: (row["value_rank"], row["consensus_adp"]))
 
     def pick_plan(
@@ -484,14 +687,7 @@ class DraftIntelligenceService:
         board = self.current_board(league, settings, drafted_ids)
         if not board:
             return []
-        roster_targets = {
-            position: sum(1 for slot in league.roster_slots if slot == position)
-            for position in ("QB", "RB", "WR", "TE")
-        }
-        if "FLEX" in league.roster_slots:
-            roster_targets["RB"] += 1
-            roster_targets["WR"] += 1
-        counts = {position: user_drafted_positions.count(position) for position in roster_targets}
+        counts = {position: user_drafted_positions.count(position) for position in ("QB", "RB", "WR", "TE")}
         strategy = strategy if strategy in {"safe", "balanced", "aggressive"} else "balanced"
         round_number = 1 + (settings.current_pick - 1) // max(1, settings.league_size)
         is_superflex = "SUPERFLEX" in league.roster_slots
@@ -499,28 +695,31 @@ class DraftIntelligenceService:
         scored = []
         for row in board:
             position = row["position"]
-            need = max(0, roster_targets.get(position, 1) - counts.get(position, 0))
-            need_bonus = min(3.0, need * 1.25)
+            fills_open_starter = marginal_roster_fit(user_drafted_positions, position, league.roster_slots)
+            need = int(fills_open_starter)
+            need_bonus = 2.25 * fills_open_starter
             if position == "QB" and not is_superflex and round_number <= 4:
                 need_bonus *= 0.35
-            if counts.get(position, 0) >= roster_targets.get(position, 1) and position in {"QB", "TE"} and round_number < 9:
+            fixed_capacity = sum(1 for slot in league.roster_slots if position in SLOT_ELIGIBILITY.get(slot, {slot}))
+            if counts.get(position, 0) >= fixed_capacity and position in {"QB", "TE"} and round_number < 9:
                 need_bonus -= 2.0
             urgency = max(0.0, min(4.0, (settings.next_pick - row["consensus_adp"]) / max(2, settings.league_size)))
             run_bonus = min(2.0, recent.count(position) * 0.45) if recent.count(position) >= 2 else 0
             wait_penalty = max(0.0, (row["consensus_adp"] - settings.next_pick) / max(2, settings.league_size))
+            waiting_cost_component = min(3.0, float(row.get("cost_of_waiting") or 0) / 8)
             value_score = max(-4.0, min(6.0, row["adp_relative_value"] / max(2, settings.league_size / 2)))
             projection_component = row["expected_vor"] / 20 if row["expected_vor"] is not None else max(0, 4 - row["consensus_adp"] / max(12, settings.league_size * 2))
             injury_penalty = 2.5 if row.get("injury_status") in {"OUT", "INJURY RESERVE", "DOUBTFUL"} else 0.75 if row.get("injury_status") == "QUESTIONABLE" else 0
             missing_projection_penalty = 1.5 if row["season_projection"] is None else 0
             if strategy == "safe":
-                score = projection_component * 1.35 + need_bonus * 1.15 + urgency * 0.9 + value_score * 0.45 + run_bonus * 0.7 - wait_penalty * 1.2 - injury_penalty * 1.5 - missing_projection_penalty
+                score = projection_component * 1.35 + need_bonus * 1.15 + urgency * 0.9 + value_score * 0.45 + run_bonus * 0.7 + waiting_cost_component * 0.8 - wait_penalty * 1.2 - injury_penalty * 1.5 - missing_projection_penalty
             elif strategy == "aggressive":
-                score = projection_component * 0.8 + need_bonus * 0.65 + urgency * 1.15 + value_score * 1.5 + run_bonus * 1.2 - wait_penalty * 0.35 - injury_penalty * 0.45 - missing_projection_penalty * 0.25
+                score = projection_component * 0.8 + need_bonus * 0.65 + urgency * 1.15 + value_score * 1.5 + run_bonus * 1.2 + waiting_cost_component * 1.2 - wait_penalty * 0.35 - injury_penalty * 0.45 - missing_projection_penalty * 0.25
             else:
-                score = projection_component + need_bonus + urgency + value_score + run_bonus - wait_penalty * 0.75 - injury_penalty - missing_projection_penalty * 0.5
+                score = projection_component + need_bonus + urgency + value_score + run_bonus + waiting_cost_component - wait_penalty * 0.75 - injury_penalty - missing_projection_penalty * 0.5
             reason = (
                 f"{strategy.title()} strategy; ESPN ADP/rank {row['consensus_adp']}; value rank {row['value_rank']}; "
-                f"{position} roster need {need}; recent {position} picks {recent.count(position)}; round {round_number}; next scheduled pick {settings.next_pick}."
+                f"fills open starter {bool(fills_open_starter)}; recent {position} picks {recent.count(position)}; round {round_number}; next scheduled pick {settings.next_pick}."
             )
             scored.append({**row, "pick_score": round(score, 2), "strategy": strategy, "recommendation_reason": reason})
         return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"] or 0), reverse=True)[: backup_count + 1]
@@ -539,35 +738,24 @@ class DraftIntelligenceService:
         if not board:
             return {"needs": [], "best": [], "strong": [], "sleepers": []}
 
-        starter_targets = {
-            position: sum(1 for slot in league.roster_slots if slot == position)
-            for position in ("QB", "RB", "WR", "TE")
-        }
-        if "FLEX" in league.roster_slots:
-            # FLEX creates a shared RB/WR need; do not pretend it is two required starters.
-            rb_count = user_drafted_positions.count("RB")
-            wr_count = user_drafted_positions.count("WR")
-            starter_targets["RB" if rb_count <= wr_count else "WR"] += 1
-        if "SUPERFLEX" in league.roster_slots:
-            starter_targets["QB"] += 1
-
-        counts = {position: user_drafted_positions.count(position) for position in starter_targets}
+        assignment = best_roster_assignment(user_drafted_positions, league.roster_slots)
+        counts = {position: user_drafted_positions.count(position) for position in ("QB", "RB", "WR", "TE")}
         round_number = 1 + (settings.current_pick - 1) // max(1, settings.league_size)
         needs = []
-        for position, target in starter_targets.items():
+        for position in ("QB", "RB", "WR", "TE"):
             filled = counts.get(position, 0)
-            gap = max(0, target - filled)
+            gap = int(marginal_roster_fit(user_drafted_positions, position, league.roster_slots))
             board_at_position = [row for row in board if row["position"] == position]
             top_vor = next((row["expected_vor"] for row in board_at_position if row["expected_vor"] is not None), 0)
             priority_score = gap * 10 + top_vor / 20
             if gap:
                 label = "STARTER NEEDED"
-            elif position in {"RB", "WR"} and round_number >= 5 and filled < target + 2:
+            elif position in {"RB", "WR"} and round_number >= 5 and filled < 4:
                 label = "DEPTH NEEDED"
                 priority_score += 2
             else:
                 label = "FILLED"
-            needs.append({"position": position, "filled": filled, "target": target, "gap": gap, "priority": label, "priority_score": round(priority_score, 2)})
+            needs.append({"position": position, "filled": filled, "target": "shared slots", "gap": gap, "priority": label, "priority_score": round(priority_score, 2)})
         needs.sort(key=lambda row: (row["priority_score"], row["gap"]), reverse=True)
 
         plan = self.pick_plan(league, settings, drafted_ids, user_drafted_positions, backup_count=9, strategy=strategy, recent_drafted_positions=recent_drafted_positions)
@@ -586,6 +774,7 @@ class DraftIntelligenceService:
             "strong": strong,
             "sleepers": sleepers,
             "round": round_number,
+            "roster_assignment": assignment,
             "method": "Live ESPN season projection, ADP, value over replacement, roster slots, and recorded picks",
         }
 
@@ -629,6 +818,38 @@ class DraftIntelligenceService:
             positions.append(choice["position"])
             previous_pick = pick_number
         return recommendations
+
+    def turn_pair_plan(
+        self,
+        league: League,
+        settings: DraftSettings,
+        draft_slot: int,
+        drafted_ids: set[str],
+        user_drafted_positions: list[str],
+        strategy: str = "balanced",
+    ) -> list[dict[str, Any]]:
+        """Jointly rank consecutive snake-turn selections."""
+        if settings.draft_type != "snake" or owner_of_pick(settings.current_pick, settings.league_size, "snake") != draft_slot:
+            return []
+        second_pick = next_owned_pick(settings.current_pick + 1, draft_slot, settings.league_size, "snake")
+        if second_pick != settings.current_pick + 1:
+            return []
+        first_options = self.pick_plan(league, settings, drafted_ids, user_drafted_positions, backup_count=5, strategy=strategy)
+        pairs = []
+        for first in first_options:
+            second_settings = DraftSettings(league_size=settings.league_size, current_pick=second_pick, next_pick=snake_next_pick(second_pick, draft_slot, settings.league_size), draft_type="snake")
+            second_options = self.pick_plan(
+                league,
+                second_settings,
+                drafted_ids | {first["player_id"]},
+                [*user_drafted_positions, first["position"]],
+                backup_count=2,
+                strategy=strategy,
+            )
+            for second in second_options:
+                diversity_bonus = 0.5 if first["position"] != second["position"] else 0
+                pairs.append({"first": first, "second": second, "pair_score": round(first["pick_score"] + second["pick_score"] + diversity_bonus, 2)})
+        return sorted(pairs, key=lambda row: row["pair_score"], reverse=True)[:3]
 
 
 def replacement_level(league: League, position: str, *, season: bool = False) -> float:
