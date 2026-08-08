@@ -28,8 +28,38 @@ jobs:
           python -m compileall -q backend scripts streamlit_app.py
 
       - name: Run tests
+        id: pytest
+        continue-on-error: true
         run: |
-          python -m pytest backend/tests
+          python -m pytest backend/tests --junitxml=pytest-results.xml
+
+      - name: Publish test failure annotations
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path("pytest-results.xml")
+          if not report.exists():
+              print("::error title=pytest report missing::pytest did not produce pytest-results.xml")
+              raise SystemExit(0)
+          root = ET.parse(report).getroot()
+          for case in root.iter("testcase"):
+              failure = case.find("failure")
+              if failure is None:
+                  failure = case.find("error")
+              if failure is None:
+                  continue
+              path = case.get("file") or "backend/tests"
+              line = case.get("line") or "1"
+              message = (failure.get("message") or failure.text or "pytest failure").replace("\n", "%0A")[:4000]
+              print(f"::error file={path},line={line},title={case.get('name','pytest failure')}::{message}")
+          PY
+
+      - name: Enforce test result
+        if: steps.pytest.outcome == 'failure'
+        run: exit 1
 
       - name: Data quality validation
         run: |
