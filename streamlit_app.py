@@ -362,6 +362,10 @@ def connect_error(exc: Exception) -> str:
         return "ESPN returned a sign-in or non-league response. The cookies are expired, copied from different ESPN sessions, or do not have access to this league. Sign out and back into ESPN, then copy fresh espn_s2 and SWID values from the same browser session."
     if str(exc) == "ESPN_RESPONSE_INVALID":
         return "ESPN returned an unexpected response instead of league data. Confirm the league season and try again."
+    if str(exc) == "ESPN_PLAYER_POOL_UNAVAILABLE":
+        return "Your league connected, but ESPN's separate draft-player request failed after three safe fallback attempts. Confirm the season is 2026, reconnect, and try again. This is an ESPN player-pool failure—not missing recommendation data."
+    if str(exc) == "ESPN_PLAYER_POOL_INVALID":
+        return "ESPN returned a malformed draft-player response. Reconnect and try again; Fourth Down did not substitute an empty or invented player pool."
     return "The league could not be connected. Check the league ID, season, team ID, and private-league credentials."
 
 

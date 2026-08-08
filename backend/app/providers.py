@@ -121,15 +121,36 @@ async def connect_espn(
         raise ValueError("TEAM_NOT_FOUND")
     free_agents=[]
     draft_pool=[]
+    scoring_items_for_draft = settings.get("scoringSettings", {}).get("scoringItems", [])
+    scoring_type = "PPR" if any(int(item.get("statId", -1)) == 53 and float(item.get("points", 0) or 0) > 0 for item in scoring_items_for_draft) else "STANDARD"
+    pool_filters = [
+        {"players":{"limit":1500,"sortDraftRanks":{"sortPriority":1,"sortAsc":True,"value":scoring_type}}},
+        {"players":{"limit":1000,"sortPercOwned":{"sortPriority":1,"sortAsc":False}}},
+        {"players":{"limit":500,"sortDraftRanks":{"sortPriority":1,"sortAsc":True,"value":"STANDARD"}}},
+    ]
+    pool_items = None
+    last_pool_error: Exception | None = None
+    for fantasy_filter in pool_filters:
+        try:
+            async with httpx.AsyncClient(timeout=15,cookies=cookies,follow_redirects=True) as client:
+                pool_response=await client.get(url,params={"view":"kona_player_info"},headers={"X-Fantasy-Filter":json.dumps(fantasy_filter)})
+            pool_response.raise_for_status()
+            candidate_items = pool_response.json().get("players", [])
+            if candidate_items:
+                pool_items = candidate_items
+                break
+            last_pool_error = ValueError("ESPN player-pool response contained no players")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403}:
+                raise
+            last_pool_error = exc
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            last_pool_error = exc
+    if pool_items is None:
+        raise ValueError("ESPN_PLAYER_POOL_UNAVAILABLE") from last_pool_error
     try:
-        scoring_items_for_draft = settings.get("scoringSettings", {}).get("scoringItems", [])
-        scoring_type = "PPR" if any(int(item.get("statId", -1)) == 53 and float(item.get("points", 0) or 0) > 0 for item in scoring_items_for_draft) else "STANDARD"
-        fantasy_filter={"players":{"limit":1500,"sortDraftRanks":{"sortPriority":1,"sortAsc":True,"value":scoring_type}}}
-        async with httpx.AsyncClient(timeout=15,cookies=cookies,follow_redirects=True) as client:
-            pool_response=await client.get(url,params={"view":"kona_player_info"},headers={"X-Fantasy-Filter":json.dumps(fantasy_filter)})
-        pool_response.raise_for_status()
         rostered={player.id for team in teams for player in team.players}
-        for item in pool_response.json().get("players",[]):
+        for item in pool_items:
             source=item.get("player",{})
             pid=str(source.get("id")); position=position_map.get(source.get("defaultPositionId"))
             if not position: continue
@@ -142,9 +163,8 @@ async def connect_espn(
             draft_pool.append(draft_player)
             if pid not in rostered:
                 free_agents.append(draft_player.model_copy(update={"rostered": False}))
-    except httpx.HTTPError:
-        free_agents=[]
-        draft_pool=[]
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError("ESPN_PLAYER_POOL_INVALID") from exc
     scoring_items=settings.get("scoringSettings",{}).get("scoringItems",[])
     scoring={str(item.get("statId")):float(item.get("points",0) or 0) for item in scoring_items if item.get("statId") is not None}
     schedule_settings = settings.get("scheduleSettings", {})

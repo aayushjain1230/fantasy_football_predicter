@@ -175,6 +175,35 @@ def test_copied_cookie_fragments_are_normalized(monkeypatch):
     assert all(call["cookies"] == {"espn_s2": "private-s2", "SWID": "{private-swid}"} for call in FakeClient.calls)
 
 
+def test_player_pool_retries_with_bounded_fallback(monkeypatch):
+    class FallbackClient(FakeClient):
+        pool_calls = 0
+
+        async def get(self, url, params=None, headers=None):
+            if headers:
+                self.__class__.pool_calls += 1
+                if self.__class__.pool_calls == 1:
+                    return FakeResponse({}, 500)
+                return FakeResponse({"players": [free_agent_fixture()]})
+            return FakeResponse(league_fixture())
+
+    FallbackClient.pool_calls = 0
+    monkeypatch.setattr(providers.httpx, "AsyncClient", FallbackClient)
+    league = asyncio.run(providers.connect_espn("123", 2026))
+    assert FallbackClient.pool_calls == 2
+    assert league.draft_pool
+
+
+def test_player_pool_failure_is_exposed_not_converted_to_empty(monkeypatch):
+    class FailedPoolClient(FakeClient):
+        async def get(self, url, params=None, headers=None):
+            return FakeResponse({}, 500) if headers else FakeResponse(league_fixture())
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", FailedPoolClient)
+    with pytest.raises(ValueError, match="ESPN_PLAYER_POOL_UNAVAILABLE"):
+        asyncio.run(providers.connect_espn("123", 2026))
+
+
 def test_private_login_page_becomes_safe_auth_error(monkeypatch):
     class HtmlResponse(FakeResponse):
         def json(self):
