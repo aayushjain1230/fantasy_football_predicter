@@ -39,7 +39,7 @@ class FakeClient:
     async def get(self, url, params=None, headers=None):
         self.calls.append({"url": url, "params": params, "headers": headers, "cookies": self.kwargs.get("cookies")})
         if headers:
-            return FakeResponse({"players": [free_agent_fixture()]})
+            return FakeResponse({"players": [free_agent_fixture(), {"player": player_fixture()}]})
         return FakeResponse(league_fixture())
 
 
@@ -97,6 +97,8 @@ def test_public_espn_response_normalization(monkeypatch):
     assert league.roster_slots == ["QB", "RB", "FLEX"]
     assert league.teams[0].players[0].name == "Test QB"
     assert league.free_agents[0].name == "Free WR"
+    assert {player.name for player in league.draft_pool} == {"Free WR", "Test QB"}
+    assert next(player for player in league.draft_pool if player.name == "Test QB").rostered
     assert league.rules.regular_season_end == 14
     assert league.schedule[0].is_complete
     assert league.schedule[1].home_team_id == "1"

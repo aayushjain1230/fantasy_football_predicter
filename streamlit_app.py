@@ -712,7 +712,8 @@ def page_draft_intelligence(league) -> None:
     plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=min(25, int(st.session_state.draft_rounds)), strategy=st.session_state.draft_strategy) if draft_type == "snake" else []
     st.caption("Uses the connected ESPN draft pool, ESPN ADP when available, ESPN draft rank, and ESPN season projections when available.")
     if not board:
-        st.info("ESPN did not return ADP or a draft rank for the remaining QB/RB/WR/TE player pool. Reconnect shortly before the draft so ESPN's current draft data can be loaded.")
+        pool = league.draft_pool or league.free_agents
+        st.info(f"ESPN returned {len(pool)} draft-pool players, but none of the remaining QB/RB/WR/TE players had ADP, draft rank, season projection, or ownership data. Sync or reconnect shortly before the draft so ESPN's current player signals can be loaded.")
         return
     if draft_type != "snake":
         st.warning(f"ESPN reports a {draft_type} draft. A snake pick-number plan would be inaccurate, so Fourth Down is showing the overall board instead.")
@@ -802,6 +803,8 @@ def page_draft_room(league) -> None:
     user_positions = [pick["position"] for pick in st.session_state.draft_picks if pick.get("owner_slot") == int(st.session_state.draft_slot)]
     if count_existing:
         user_positions = existing_roster + user_positions
+        if user_team:
+            drafted_ids.update(player.id for player in user_team.players)
     recent_positions = [pick.get("position", "UNKNOWN") for pick in st.session_state.draft_picks]
     insights = DEFAULT_DRAFT_SERVICE.draft_insights(league, settings, drafted_ids, user_positions, strategy=st.session_state.draft_strategy, recent_drafted_positions=recent_positions)
     plan = insights["best"]
@@ -875,7 +878,8 @@ def page_draft_room(league) -> None:
                 use_container_width=True,
             )
     else:
-        st.info("ESPN has not supplied enough live ADP and season-projection data to make a draft recommendation.")
+        pool = league.draft_pool or league.free_agents
+        st.info(f"No recommendation is available from the {len(pool)} ESPN draft-pool players because the remaining players lack ADP, draft rank, season projection, and ownership signals.")
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted_ids)
     if board:
         pick = st.selectbox("Player selected at this overall pick", board, format_func=lambda row: f"{row['player_name']} ({row['position']}, {row['team']})")

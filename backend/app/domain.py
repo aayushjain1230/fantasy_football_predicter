@@ -92,6 +92,7 @@ class League(BaseModel):
     roster_slots: list[str]
     teams: list[Team]
     free_agents: list[Player] = Field(default_factory=list)
+    draft_pool: list[Player] = Field(default_factory=list)
     scoring: dict[str, float] = Field(default_factory=dict)
     playoff_team_count: int = 4
     acquisition_budget: int | None = None

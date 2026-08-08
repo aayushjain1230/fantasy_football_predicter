@@ -586,12 +586,18 @@ class DraftIntelligenceService:
 
     def current_board(self, league: League, settings: DraftSettings, drafted_ids: set[str] | None = None) -> list[dict[str, Any]]:
         drafted_ids = drafted_ids or set()
+        draftable_players = league.draft_pool or league.free_agents
         players = [
             player
-            for player in league.free_agents
+            for player in draftable_players
             if player.id not in drafted_ids
             and player.position in {"QB", "RB", "WR", "TE"}
-            and (player.average_draft_position is not None or player.espn_rank is not None)
+            and (
+                player.average_draft_position is not None
+                or player.espn_rank is not None
+                or player.season_projection is not None
+                or player.percent_owned is not None
+            )
         ]
         if not players:
             return []
@@ -599,11 +605,22 @@ class DraftIntelligenceService:
             position: replacement_level(league, position, season=True)
             for position in {player.position for player in players}
         }
+        fallback_order = sorted(
+            players,
+            key=lambda player: (
+                player.average_draft_position is None and player.espn_rank is None,
+                float(player.average_draft_position or player.espn_rank or 9999),
+                -float(player.season_projection or 0),
+                -float(player.percent_owned or 0),
+            ),
+        )
+        fallback_rank = {player.id: rank for rank, player in enumerate(fallback_order, 1)}
         base_rows = []
         for player in players:
             season_value = float(player.season_projection) if player.season_projection is not None else None
             vor = season_value - replacement.get(player.position, 0) if season_value is not None else None
-            market_pick = float(player.average_draft_position or player.espn_rank or 9999)
+            market_pick = float(player.average_draft_position or player.espn_rank or fallback_rank[player.id])
+            market_source = "ESPN ADP" if player.average_draft_position is not None else "ESPN draft rank" if player.espn_rank is not None else "ESPN season projection order" if player.season_projection is not None else "ESPN ownership order"
             base_rows.append(
                 {
                     "player_id": player.id,
@@ -612,6 +629,7 @@ class DraftIntelligenceService:
                     "team": player.team,
                     "consensus_adp": round(market_pick, 2),
                     "adp_available": player.average_draft_position is not None,
+                    "market_source": market_source,
                     "espn_rank": player.espn_rank,
                     "percent_owned": player.percent_owned,
                     "injury_status": player.injury_status,
@@ -637,9 +655,9 @@ class DraftIntelligenceService:
             if row["season_projection"] is not None and row["adp_available"]:
                 row["confidence"] = "ESPN live ADP + season projection"
             elif row["season_projection"] is not None:
-                row["confidence"] = "ESPN draft rank + season projection"
+                row["confidence"] = f"{row['market_source']} + ESPN season projection"
             else:
-                row["confidence"] = "ESPN live draft rank; season projection unavailable"
+                row["confidence"] = f"{row['market_source']}; season projection unavailable"
             row["availability_method"] = "ESPN average draft position; no fabricated next-pick probability"
             row["fallback_used"] = False
         for position in {row["position"] for row in base_rows}:
@@ -858,7 +876,12 @@ def replacement_level(league: League, position: str, *, season: bool = False) ->
     flex_share = 0.35 if position in {"RB", "WR", "TE"} and "FLEX" in league.roster_slots else 0
     superflex_share = 0.5 if position == "QB" and "SUPERFLEX" in league.roster_slots else 0
     starters = teams * max(1, slot_count + flex_share + superflex_share)
-    all_players = [p for t in league.teams for p in t.players if p.position == position] + [p for p in league.free_agents if p.position == position]
+    if league.draft_pool:
+        all_players = [player for player in league.draft_pool if player.position == position]
+    else:
+        by_id = {player.id: player for team in league.teams for player in team.players if player.position == position}
+        by_id.update({player.id: player for player in league.free_agents if player.position == position})
+        all_players = list(by_id.values())
     values = sorted(
         (
             float(p.season_projection)

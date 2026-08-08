@@ -111,7 +111,25 @@ def test_espn_rank_produces_board_when_projection_and_adp_are_missing(tmp_path):
     assert board
     assert board[0]["consensus_adp"] == 1
     assert board[0]["season_projection"] is None
-    assert board[0]["confidence"] == "ESPN live draft rank; season projection unavailable"
+    assert board[0]["confidence"] == "ESPN draft rank; season projection unavailable"
+
+
+def test_draft_board_uses_full_pool_not_waiver_pool(tmp_path):
+    league = demo_league()
+    candidate = league.free_agents[0].model_copy(update={"average_draft_position": 8.0, "season_projection": 220.0, "rostered": True})
+    league.free_agents = []
+    league.draft_pool = [candidate]
+    board = DraftIntelligenceService(tmp_path).current_board(league, DraftSettings(current_pick=1, next_pick=12), set())
+    assert [row["player_id"] for row in board] == [candidate.id]
+
+
+def test_projection_or_ownership_can_power_honest_fallback_board(tmp_path):
+    league = demo_league()
+    projection_player = league.free_agents[0].model_copy(update={"average_draft_position": None, "espn_rank": None, "season_projection": 210.0})
+    ownership_player = league.free_agents[1].model_copy(update={"average_draft_position": None, "espn_rank": None, "season_projection": None, "percent_owned": 88.0})
+    league.draft_pool = [projection_player, ownership_player]
+    board = DraftIntelligenceService(tmp_path).current_board(league, DraftSettings(current_pick=1, next_pick=12), set())
+    assert {row["market_source"] for row in board} == {"ESPN season projection order", "ESPN ownership order"}
 
 
 def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):

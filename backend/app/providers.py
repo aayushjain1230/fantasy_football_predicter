@@ -120,6 +120,7 @@ async def connect_espn(
     if teams and not any(team.id==str(chosen) for team in teams):
         raise ValueError("TEAM_NOT_FOUND")
     free_agents=[]
+    draft_pool=[]
     try:
         scoring_items_for_draft = settings.get("scoringSettings", {}).get("scoringItems", [])
         scoring_type = "PPR" if any(int(item.get("statId", -1)) == 53 and float(item.get("points", 0) or 0) > 0 for item in scoring_items_for_draft) else "STANDARD"
@@ -131,15 +132,19 @@ async def connect_espn(
         for item in pool_response.json().get("players",[]):
             source=item.get("player",{})
             pid=str(source.get("id")); position=position_map.get(source.get("defaultPositionId"))
-            if not position or pid in rostered: continue
+            if not position: continue
             values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)))
             projected = values["weekly_projection"]
             eligible={position}
             if position in {"RB","WR","TE"}: eligible.add("FLEX")
             if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
-            free_agents.append(__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,float(projected or 0)),stdev=max(.1,float(projected or 0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=False,projection_available=projected is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"]))
+            draft_player=__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,float(projected or 0)),stdev=max(.1,float(projected or 0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=pid in rostered,projection_available=projected is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"])
+            draft_pool.append(draft_player)
+            if pid not in rostered:
+                free_agents.append(draft_player.model_copy(update={"rostered": False}))
     except httpx.HTTPError:
         free_agents=[]
+        draft_pool=[]
     scoring_items=settings.get("scoringSettings",{}).get("scoringItems",[])
     scoring={str(item.get("statId")):float(item.get("points",0) or 0) for item in scoring_items if item.get("statId") is not None}
     schedule_settings = settings.get("scheduleSettings", {})
@@ -174,7 +179,7 @@ async def connect_espn(
     draft_size = max(2, int(settings.get("size") or len(teams) or 12))
     draft_type = str((settings.get("draftSettings") or {}).get("type") or "SNAKE").upper()
     player_lookup = {player.id: player for team in teams for player in team.players}
-    player_lookup.update({player.id: player for player in free_agents})
+    player_lookup.update({player.id: player for player in draft_pool})
     for raw_pick in (raw.get("draftDetail") or {}).get("picks", []):
         player_id = str(raw_pick.get("playerId") or "")
         if not player_id:
@@ -195,7 +200,7 @@ async def connect_espn(
         })
     normalized_settings = dict(settings)
     normalized_settings["_draft_picks"] = sorted(draft_picks, key=lambda pick: pick["number"])
-    return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=normalized_settings)
+    return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, draft_pool=draft_pool, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=normalized_settings)
 
 
 def statuses(demo: bool = False) -> list[ProviderStatus]:
