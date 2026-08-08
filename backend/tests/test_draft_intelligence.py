@@ -11,6 +11,7 @@ from app.draft_intelligence import (
     consensus_adp,
     fit_outcome_thresholds,
     league_draft_type,
+    league_team_count,
     load_csv,
     snake_next_pick,
     train_draft_artifact,
@@ -186,6 +187,18 @@ def test_league_draft_type_uses_espn_settings():
     assert league_draft_type(league) == "snake"
     league.raw_settings = {"draftSettings": {"type": "AUCTION"}}
     assert league_draft_type(league) == "auction"
+
+
+def test_configured_espn_league_size_wins_over_partial_team_list():
+    league = demo_league()
+    league.raw_settings = {"size": 12}
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(10 + index * 5)
+        player.season_projection = player.mean * 14
+    assert len(league.teams) != 12
+    assert league_team_count(league) == 12
+    plan = DraftIntelligenceService().overall_pick_plan(league, draft_slot=12, rounds=2)
+    assert [row["overall_pick"] for row in plan] == [12, 13]
 
 
 def test_drafted_players_are_removed(tmp_path):

@@ -75,6 +75,16 @@ def league_draft_type(league: League) -> str:
     return "snake"
 
 
+def league_team_count(league: League) -> int:
+    """Prefer ESPN's configured league size; the team list can be partial pre-draft."""
+    configured = league.raw_settings.get("size") if isinstance(league.raw_settings, dict) else None
+    try:
+        size = int(configured)
+    except (TypeError, ValueError):
+        size = len(league.teams)
+    return max(2, size or len(league.teams) or 12)
+
+
 def validate_adp_rows(rows: list[dict[str, Any]]) -> None:
     required = {"season", "snapshot_date", "provider", "platform", "scoring_format", "league_size", "draft_type", "player_id", "player_name", "position", "team", "adp"}
     missing = required - set(rows[0].keys() if rows else [])
@@ -468,6 +478,7 @@ class DraftIntelligenceService:
         user_drafted_positions: list[str],
         backup_count: int = 5,
         strategy: str = "balanced",
+        recent_drafted_positions: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Rank the best current pick and backups from live ESPN values only."""
         board = self.current_board(league, settings, drafted_ids)
@@ -484,6 +495,7 @@ class DraftIntelligenceService:
         strategy = strategy if strategy in {"safe", "balanced", "aggressive"} else "balanced"
         round_number = 1 + (settings.current_pick - 1) // max(1, settings.league_size)
         is_superflex = "SUPERFLEX" in league.roster_slots
+        recent = list(recent_drafted_positions or [])[-6:]
         scored = []
         for row in board:
             position = row["position"]
@@ -494,19 +506,21 @@ class DraftIntelligenceService:
             if counts.get(position, 0) >= roster_targets.get(position, 1) and position in {"QB", "TE"} and round_number < 9:
                 need_bonus -= 2.0
             urgency = max(0.0, min(4.0, (settings.next_pick - row["consensus_adp"]) / max(2, settings.league_size)))
+            run_bonus = min(2.0, recent.count(position) * 0.45) if recent.count(position) >= 2 else 0
+            wait_penalty = max(0.0, (row["consensus_adp"] - settings.next_pick) / max(2, settings.league_size))
             value_score = max(-4.0, min(6.0, row["adp_relative_value"] / max(2, settings.league_size / 2)))
             projection_component = row["expected_vor"] / 20 if row["expected_vor"] is not None else max(0, 4 - row["consensus_adp"] / max(12, settings.league_size * 2))
             injury_penalty = 2.5 if row.get("injury_status") in {"OUT", "INJURY RESERVE", "DOUBTFUL"} else 0.75 if row.get("injury_status") == "QUESTIONABLE" else 0
             missing_projection_penalty = 1.5 if row["season_projection"] is None else 0
             if strategy == "safe":
-                score = projection_component * 1.35 + need_bonus * 1.15 + urgency * 0.9 + value_score * 0.45 - injury_penalty * 1.5 - missing_projection_penalty
+                score = projection_component * 1.35 + need_bonus * 1.15 + urgency * 0.9 + value_score * 0.45 + run_bonus * 0.7 - wait_penalty * 1.2 - injury_penalty * 1.5 - missing_projection_penalty
             elif strategy == "aggressive":
-                score = projection_component * 0.8 + need_bonus * 0.65 + urgency * 1.15 + value_score * 1.5 - injury_penalty * 0.45 - missing_projection_penalty * 0.25
+                score = projection_component * 0.8 + need_bonus * 0.65 + urgency * 1.15 + value_score * 1.5 + run_bonus * 1.2 - wait_penalty * 0.35 - injury_penalty * 0.45 - missing_projection_penalty * 0.25
             else:
-                score = projection_component + need_bonus + urgency + value_score - injury_penalty - missing_projection_penalty * 0.5
+                score = projection_component + need_bonus + urgency + value_score + run_bonus - wait_penalty * 0.75 - injury_penalty - missing_projection_penalty * 0.5
             reason = (
                 f"{strategy.title()} strategy; ESPN ADP/rank {row['consensus_adp']}; value rank {row['value_rank']}; "
-                f"{position} roster need {need}; round {round_number}; next scheduled pick {settings.next_pick}."
+                f"{position} roster need {need}; recent {position} picks {recent.count(position)}; round {round_number}; next scheduled pick {settings.next_pick}."
             )
             scored.append({**row, "pick_score": round(score, 2), "strategy": strategy, "recommendation_reason": reason})
         return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"] or 0), reverse=True)[: backup_count + 1]
@@ -518,6 +532,7 @@ class DraftIntelligenceService:
         drafted_ids: set[str],
         user_drafted_positions: list[str],
         strategy: str = "balanced",
+        recent_drafted_positions: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build live, roster-aware draft groups without inventing unavailable data."""
         board = self.current_board(league, settings, drafted_ids)
@@ -555,7 +570,7 @@ class DraftIntelligenceService:
             needs.append({"position": position, "filled": filled, "target": target, "gap": gap, "priority": label, "priority_score": round(priority_score, 2)})
         needs.sort(key=lambda row: (row["priority_score"], row["gap"]), reverse=True)
 
-        plan = self.pick_plan(league, settings, drafted_ids, user_drafted_positions, backup_count=9, strategy=strategy)
+        plan = self.pick_plan(league, settings, drafted_ids, user_drafted_positions, backup_count=9, strategy=strategy, recent_drafted_positions=recent_drafted_positions)
         strong = sorted(board, key=lambda row: row["value_rank"])[:8]
         sleeper_pool = [
             row for row in board
@@ -583,7 +598,7 @@ class DraftIntelligenceService:
         strategy: str = "balanced",
     ) -> list[dict[str, Any]]:
         """Create a pre-draft slot plan; availability is an ADP window, not a promise."""
-        league_size = max(2, len(league.teams) or 12)
+        league_size = league_team_count(league)
         draft_slot = min(max(1, draft_slot), league_size)
         chosen_ids: set[str] = set()
         positions = list(keeper_positions or [])
@@ -591,7 +606,7 @@ class DraftIntelligenceService:
         previous_pick = 0
         for round_number in range(1, rounds + 1):
             pick_number = snake_next_pick(previous_pick, draft_slot, league_size)
-            next_pick = snake_next_pick(pick_number + 1, draft_slot, league_size)
+            next_pick = snake_next_pick(pick_number, draft_slot, league_size)
             board = self.current_board(league, DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick), chosen_ids)
             likely_gone = {
                 row["player_id"]
@@ -617,7 +632,7 @@ class DraftIntelligenceService:
 
 
 def replacement_level(league: League, position: str, *, season: bool = False) -> float:
-    teams = max(1, len(league.teams))
+    teams = league_team_count(league)
     slot_count = sum(1 for slot in league.roster_slots if slot == position)
     flex_share = 0.35 if position in {"RB", "WR", "TE"} and "FLEX" in league.roster_slots else 0
     superflex_share = 0.5 if position == "QB" and "SUPERFLEX" in league.roster_slots else 0

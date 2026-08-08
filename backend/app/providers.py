@@ -57,7 +57,7 @@ async def connect_espn(
     elif CONFIG.espn_s2 and CONFIG.espn_swid and not CONFIG.cloud_mode:
         cookies = {"espn_s2": CONFIG.espn_s2, "SWID": CONFIG.espn_swid}
     url = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{league_id}"
-    params = [("view", v) for v in ("mSettings", "mTeam", "mRoster", "mMatchup")]
+    params = [("view", v) for v in ("mSettings", "mTeam", "mRoster", "mMatchup", "mDraftDetail")]
     async with httpx.AsyncClient(timeout=15, cookies=cookies) as client:
         response = await client.get(url, params=params)
     response.raise_for_status()
@@ -148,7 +148,32 @@ async def connect_espn(
     if schedule_settings.get("playoffMatchupPeriodLength") not in (None, 1):
         assumptions.append("Multi-week playoff length is preserved for display; the simulator treats supported playoffs as one scoring period per round unless ESPN's raw settings clearly specify otherwise.")
     rules = LeagueRuleSet(regular_season_start=1, regular_season_end=regular_season_end, playoff_start=regular_season_end + 1, playoff_end=int(schedule_settings.get("playoffMatchupPeriodCount", regular_season_end + 3) or regular_season_end + 3), playoff_matchup_period_length=int(schedule_settings.get("playoffMatchupPeriodLength", 1) or 1), first_round_byes=first_byes, tiebreaker="record_then_points_for", reseeding="fixed", unsupported=unsupported, assumptions=assumptions, raw=schedule_settings)
-    return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=settings)
+    draft_picks = []
+    draft_size = max(2, int(settings.get("size") or len(teams) or 12))
+    draft_type = str((settings.get("draftSettings") or {}).get("type") or "SNAKE").upper()
+    player_lookup = {player.id: player for team in teams for player in team.players}
+    player_lookup.update({player.id: player for player in free_agents})
+    for raw_pick in (raw.get("draftDetail") or {}).get("picks", []):
+        player_id = str(raw_pick.get("playerId") or "")
+        if not player_id:
+            continue
+        player = player_lookup.get(player_id)
+        pick_number = int(raw_pick.get("overallPickNumber") or len(draft_picks) + 1)
+        round_index = (pick_number - 1) // draft_size
+        pick_in_round = ((pick_number - 1) % draft_size) + 1
+        owner_slot = draft_size - pick_in_round + 1 if "SNAKE" in draft_type and round_index % 2 else pick_in_round
+        draft_picks.append({
+            "number": pick_number,
+            "owner_slot": owner_slot,
+            "team_id": str(raw_pick.get("teamId") or ""),
+            "player_id": player_id,
+            "player_name": player.name if player else f"ESPN player {player_id}",
+            "position": player.position if player else "UNKNOWN",
+            "source": "ESPN live draft",
+        })
+    normalized_settings = dict(settings)
+    normalized_settings["_draft_picks"] = sorted(draft_picks, key=lambda pick: pick["number"])
+    return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=normalized_settings)
 
 
 def statuses(demo: bool = False) -> list[ProviderStatus]:

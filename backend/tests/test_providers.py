@@ -63,10 +63,13 @@ def league_fixture():
         "scoringPeriodId": 1,
         "settings": {
             "name": "Public League",
+            "size": 10,
+            "draftSettings": {"type": "SNAKE"},
             "rosterSettings": {"lineupSlotCounts": {"0": 1, "2": 1, "23": 1}},
             "scoringSettings": {"scoringItems": [{"statId": 1, "points": 1}]},
             "scheduleSettings": {"playoffTeamCount": 4, "matchupPeriodCount": 14},
         },
+        "draftDetail": {"picks": [{"overallPickNumber": 1, "teamId": 1, "playerId": 100}]},
         "schedule": [
             {"id": 1, "matchupPeriodId": 1, "home": {"teamId": 1, "totalPoints": 99.5}, "away": {"teamId": 2, "totalPoints": 88.0}, "winner": "HOME"},
             {"id": 2, "matchupPeriodId": 2, "home": {"teamId": 1}, "away": {"teamId": 2}},
@@ -96,7 +99,11 @@ def test_public_espn_response_normalization(monkeypatch):
     assert league.rules.regular_season_end == 14
     assert league.schedule[0].is_complete
     assert league.schedule[1].home_team_id == "1"
+    assert league.raw_settings["size"] == 10
+    assert league.raw_settings["_draft_picks"][0]["player_name"] == "Test QB"
+    assert league.raw_settings["_draft_picks"][0]["owner_slot"] == 1
     assert all(call["cookies"] == {} for call in FakeClient.calls)
+    assert any(("view", "mDraftDetail") in (call["params"] or []) for call in FakeClient.calls if not call["headers"])
     pool_call = next(call for call in FakeClient.calls if call["headers"])
     draft_filter = json.loads(pool_call["headers"]["X-Fantasy-Filter"])["players"]
     assert draft_filter["limit"] == 1500

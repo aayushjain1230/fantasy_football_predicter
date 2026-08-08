@@ -46,7 +46,7 @@ from app.advanced import (  # noqa: E402
     what_if,
 )
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
-from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSettings, league_draft_type, snake_next_pick  # noqa: E402
+from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSettings, league_draft_type, league_team_count, snake_next_pick  # noqa: E402
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
 from app.providers import connect_espn, statuses  # noqa: E402
 from app.decision_service import build_weekly_brief, roster_outlook, value_based_faab  # noqa: E402
@@ -103,6 +103,8 @@ def ensure_state() -> None:
         st.session_state.league = None
     if "league_connected" not in st.session_state:
         st.session_state.league_connected = False
+    if "espn_connection" not in st.session_state:
+        st.session_state.espn_connection = None
     if "mode" not in st.session_state:
         st.session_state.mode = "disconnected"
     if "draft_picks" not in st.session_state:
@@ -371,6 +373,13 @@ def page_connect() -> None:
                     )
                 )
             st.session_state.league = league
+            st.session_state.espn_connection = {
+                "league_id": league_id,
+                "season": int(season),
+                "team_id": team_id or None,
+                "espn_s2": espn_s2,
+                "espn_swid": espn_swid,
+            }
             st.session_state.mode = "live"
             st.session_state.league_connected = True
             st.session_state.draft_picks = []
@@ -382,6 +391,7 @@ def page_connect() -> None:
             st.error(connect_error(exc))
     if st.button("Disconnect league"):
         st.session_state.league = None
+        st.session_state.espn_connection = None
         st.session_state.mode = "disconnected"
         st.session_state.league_connected = False
         st.session_state.draft_picks = []
@@ -396,7 +406,7 @@ def page_connect() -> None:
         st.rerun()
     st.info(
         "League data is browser-session scoped and may reset when Streamlit reconnects. "
-        "Private ESPN credentials are not retained after the connection form is submitted."
+        "Private ESPN credentials remain only in this browser session so Live Draft can refresh ESPN; disconnect or Reset Session wipes them."
     )
 
 
@@ -595,7 +605,7 @@ def page_draft(league) -> None:
 
 
 def draft_settings_from_state(league) -> DraftSettings:
-    league_size = max(2, len(league.teams) or 12)
+    league_size = league_team_count(league)
     current_pick = max(1, int(st.session_state.current_pick))
     draft_slot = min(max(1, int(st.session_state.draft_slot)), league_size)
     st.session_state.current_pick = current_pick
@@ -666,7 +676,29 @@ def page_draft_intelligence(league) -> None:
 
 def page_draft_room(league) -> None:
     section_header("Who Should I Draft?", "A live pick-by-pick answer using your draft slot, roster construction, ESPN projections, ADP, and value over replacement.")
-    league_size = max(2, len(league.teams) or 12)
+    league_size = league_team_count(league)
+    sync_a, sync_b = st.columns([1, 2])
+    if sync_a.button("Sync ESPN draft now", type="primary", use_container_width=True):
+        connection = st.session_state.get("espn_connection")
+        if not connection:
+            sync_b.error("Reconnect the league once so this session can securely refresh ESPN draft picks.")
+        elif action_allowed("espn-draft-sync", 20, 300):
+            try:
+                with st.spinner("Loading the latest ESPN selections..."):
+                    refreshed = asyncio.run(connect_espn(**connection))
+                espn_picks = list(refreshed.raw_settings.get("_draft_picks", []))
+                st.session_state.league = refreshed
+                if espn_picks:
+                    st.session_state.draft_picks = espn_picks
+                    st.session_state.current_pick = max(pick["number"] for pick in espn_picks) + 1
+                    st.session_state.draft_sync_message = f"Synced {len(espn_picks)} ESPN picks. Recommendations recalculated for overall pick {st.session_state.current_pick}."
+                else:
+                    st.session_state.draft_sync_message = "ESPN has not published any completed draft picks yet. Your manually recorded picks were kept."
+                st.rerun()
+            except Exception as exc:
+                sync_b.error(connect_error(exc))
+    if st.session_state.get("draft_sync_message"):
+        sync_b.success(st.session_state.pop("draft_sync_message"))
     st.session_state.current_pick = st.number_input("Current overall pick", min_value=1, max_value=300, value=int(st.session_state.current_pick), step=1)
     user_team = next((team for team in league.teams if team.id == league.user_team_id), None)
     existing_roster = [player.position for player in user_team.players] if user_team else []
@@ -687,7 +719,8 @@ def page_draft_room(league) -> None:
     user_positions = [pick["position"] for pick in st.session_state.draft_picks if pick.get("owner_slot") == int(st.session_state.draft_slot)]
     if count_existing:
         user_positions = existing_roster + user_positions
-    insights = DEFAULT_DRAFT_SERVICE.draft_insights(league, settings, drafted_ids, user_positions, strategy=st.session_state.draft_strategy)
+    recent_positions = [pick.get("position", "UNKNOWN") for pick in st.session_state.draft_picks]
+    insights = DEFAULT_DRAFT_SERVICE.draft_insights(league, settings, drafted_ids, user_positions, strategy=st.session_state.draft_strategy, recent_drafted_positions=recent_positions)
     plan = insights["best"]
     c1, c2, c3 = st.columns(3)
     c1.metric("On the clock", f"Slot {owner_slot}", "Your pick" if owner_slot == int(st.session_state.draft_slot) else "Opponent pick")
@@ -1185,11 +1218,11 @@ def page_league(league) -> None:
 def page_draft_context(league) -> None:
     st.header("Draft")
     st.caption("Start with your slot-based overall pick plan, then use Live Draft to recalculate after every selection.")
-    league_size = max(2, len(league.teams) or 12)
+    league_size = league_team_count(league)
     draft_type = league_draft_type(league)
     control_a, control_b, control_c = st.columns([1, 1.5, 2])
     st.session_state.draft_slot = control_a.number_input("Your draft slot", min_value=1, max_value=league_size, value=min(int(st.session_state.draft_slot), league_size), step=1)
-    control_b.metric("ESPN draft type", draft_type.title())
+    control_b.metric("ESPN draft type", draft_type.title(), f"{league_size} teams")
     st.session_state.draft_strategy = control_c.radio(
         "Draft mindset",
         ["safe", "balanced", "aggressive"],
@@ -1375,7 +1408,7 @@ def page_settings(league) -> None:
         st.subheader("Session Reset")
         st.write("Reset clears Streamlit session state for league, draft, scenarios, selections, and private derived results. It does not remove data from ESPN or other providers.")
         if st.button("Reset this Streamlit session"):
-            for key in ["league", "mode", "draft_picks", "draft_strategy", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection", "openweather_api_key", "openweather_connection", "decision_journal"]:
+            for key in ["league", "espn_connection", "mode", "draft_picks", "draft_strategy", "playoff_scenarios", "playoff_scenario_history", "simulation_cache", "draft_slot", "current_pick", "odds_api_key", "odds_connection", "openweather_api_key", "openweather_connection", "decision_journal"]:
                 st.session_state.pop(key, None)
             st.rerun()
     with tabs[6]:
