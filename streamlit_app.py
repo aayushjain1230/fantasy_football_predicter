@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import importlib
 import io
 import json
 import os
@@ -48,7 +49,23 @@ from app.advanced import (  # noqa: E402
     what_if,
 )
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
-from app.draft_intelligence import DEFAULT_DRAFT_SERVICE, DraftSelection, DraftSettings, DraftState, build_draft_configuration, league_draft_type, league_team_count, owner_of_pick, snake_next_pick  # noqa: E402
+from app import draft_intelligence as _draft_intelligence  # noqa: E402
+
+# Streamlit Cloud may hot-reload this entry point while retaining the previous
+# backend module in sys.modules. Reload only when a newly deployed symbol is
+# absent so an atomic Git deploy cannot fail against that stale module object.
+if not hasattr(_draft_intelligence, "DraftConfiguration"):
+    _draft_intelligence = importlib.reload(_draft_intelligence)
+
+DEFAULT_DRAFT_SERVICE = _draft_intelligence.DEFAULT_DRAFT_SERVICE
+DraftSelection = _draft_intelligence.DraftSelection
+DraftSettings = _draft_intelligence.DraftSettings
+DraftState = _draft_intelligence.DraftState
+build_draft_configuration = _draft_intelligence.build_draft_configuration
+league_draft_type = _draft_intelligence.league_draft_type
+league_team_count = _draft_intelligence.league_team_count
+owner_of_pick = _draft_intelligence.owner_of_pick
+snake_next_pick = _draft_intelligence.snake_next_pick
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
 from app.providers import connect_espn, statuses  # noqa: E402
 from app.decision_service import build_weekly_brief, roster_outlook, value_based_faab  # noqa: E402
