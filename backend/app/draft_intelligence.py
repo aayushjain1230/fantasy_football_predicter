@@ -468,6 +468,67 @@ class DraftIntelligenceService:
             scored.append({**row, "pick_score": round(score, 2), "recommendation_reason": reason})
         return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"]), reverse=True)[: backup_count + 1]
 
+    def draft_insights(
+        self,
+        league: League,
+        settings: DraftSettings,
+        drafted_ids: set[str],
+        user_drafted_positions: list[str],
+    ) -> dict[str, Any]:
+        """Build live, roster-aware draft groups without inventing unavailable data."""
+        board = self.current_board(league, settings, drafted_ids)
+        if not board:
+            return {"needs": [], "best": [], "strong": [], "sleepers": []}
+
+        starter_targets = {
+            position: sum(1 for slot in league.roster_slots if slot == position)
+            for position in ("QB", "RB", "WR", "TE")
+        }
+        if "FLEX" in league.roster_slots:
+            # FLEX creates a shared RB/WR need; do not pretend it is two required starters.
+            rb_count = user_drafted_positions.count("RB")
+            wr_count = user_drafted_positions.count("WR")
+            starter_targets["RB" if rb_count <= wr_count else "WR"] += 1
+        if "SUPERFLEX" in league.roster_slots:
+            starter_targets["QB"] += 1
+
+        counts = {position: user_drafted_positions.count(position) for position in starter_targets}
+        round_number = 1 + (settings.current_pick - 1) // max(1, settings.league_size)
+        needs = []
+        for position, target in starter_targets.items():
+            filled = counts.get(position, 0)
+            gap = max(0, target - filled)
+            board_at_position = [row for row in board if row["position"] == position]
+            top_vor = board_at_position[0]["expected_vor"] if board_at_position else 0
+            priority_score = gap * 10 + top_vor / 20
+            if gap:
+                label = "STARTER NEEDED"
+            elif position in {"RB", "WR"} and round_number >= 5 and filled < target + 2:
+                label = "DEPTH NEEDED"
+                priority_score += 2
+            else:
+                label = "FILLED"
+            needs.append({"position": position, "filled": filled, "target": target, "gap": gap, "priority": label, "priority_score": round(priority_score, 2)})
+        needs.sort(key=lambda row: (row["priority_score"], row["gap"]), reverse=True)
+
+        plan = self.pick_plan(league, settings, drafted_ids, user_drafted_positions, backup_count=9)
+        strong = sorted(board, key=lambda row: (row["expected_vor"], -row["consensus_adp"]), reverse=True)[:8]
+        sleeper_pool = [
+            row for row in board
+            if row["adp_relative_value"] >= max(6, settings.league_size / 2)
+            and row["consensus_adp"] >= settings.current_pick + max(6, settings.league_size // 2)
+            and row["expected_vor"] > 0
+        ]
+        sleepers = sorted(sleeper_pool, key=lambda row: (row["adp_relative_value"], row["expected_vor"]), reverse=True)[:8]
+        return {
+            "needs": needs,
+            "best": plan,
+            "strong": strong,
+            "sleepers": sleepers,
+            "round": round_number,
+            "method": "Live ESPN season projection, ADP, value over replacement, roster slots, and recorded picks",
+        }
+
 
 def replacement_level(league: League, position: str, *, season: bool = False) -> float:
     teams = max(1, len(league.teams))

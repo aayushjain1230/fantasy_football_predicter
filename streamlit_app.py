@@ -644,10 +644,18 @@ def page_draft_intelligence(league) -> None:
 
 
 def page_draft_room(league) -> None:
-    section_header("Live Draft Room", "Best available pick, ranked backups, roster fit, and snake-draft tracking from live ESPN data.")
+    section_header("Who Should I Draft?", "A live pick-by-pick answer using your draft slot, roster construction, ESPN projections, ADP, and value over replacement.")
     league_size = max(2, len(league.teams) or 12)
-    st.session_state.draft_slot = st.number_input("Your draft slot", min_value=1, max_value=league_size, value=int(st.session_state.draft_slot), step=1)
-    st.session_state.current_pick = st.number_input("Current overall pick", min_value=1, max_value=300, value=int(st.session_state.current_pick), step=1)
+    setup_a, setup_b = st.columns(2)
+    st.session_state.draft_slot = setup_a.number_input("Your draft slot", min_value=1, max_value=league_size, value=int(st.session_state.draft_slot), step=1)
+    st.session_state.current_pick = setup_b.number_input("Current overall pick", min_value=1, max_value=300, value=int(st.session_state.current_pick), step=1)
+    user_team = next((team for team in league.teams if team.id == league.user_team_id), None)
+    existing_roster = [player.position for player in user_team.players] if user_team else []
+    count_existing = st.toggle(
+        "Count my current ESPN roster as keepers",
+        value=False,
+        help="Turn this on only if those players will remain on your roster for this draft. Leave it off for a normal redraft league.",
+    )
     settings = draft_settings_from_state(league)
     current_pick = int(st.session_state.current_pick)
     round_index = (current_pick - 1) // league_size
@@ -655,7 +663,10 @@ def page_draft_room(league) -> None:
     owner_slot = pick_in_round if round_index % 2 == 0 else league_size - pick_in_round + 1
     drafted_ids = {pick["player_id"] for pick in st.session_state.draft_picks}
     user_positions = [pick["position"] for pick in st.session_state.draft_picks if pick.get("owner_slot") == int(st.session_state.draft_slot)]
-    plan = DEFAULT_DRAFT_SERVICE.pick_plan(league, settings, drafted_ids, user_positions)
+    if count_existing:
+        user_positions = existing_roster + user_positions
+    insights = DEFAULT_DRAFT_SERVICE.draft_insights(league, settings, drafted_ids, user_positions)
+    plan = insights["best"]
     c1, c2, c3 = st.columns(3)
     c1.metric("On the clock", f"Slot {owner_slot}", "Your pick" if owner_slot == int(st.session_state.draft_slot) else "Opponent pick")
     c2.metric("Your draft slot", int(st.session_state.draft_slot))
@@ -663,29 +674,40 @@ def page_draft_room(league) -> None:
     if plan:
         best = plan[0]
         if owner_slot == int(st.session_state.draft_slot):
-            st.success(f"Best pick now: {best['player_name']} ({best['position']}, {best['team']})")
+            st.success(f"DRAFT {best['player_name']} — {best['position']}, {best['team']}")
         else:
             st.info(f"Current top target for your next pick: {best['player_name']} ({best['position']}, {best['team']})")
         st.caption(best["recommendation_reason"] + " This is a decision estimate from live ESPN inputs, not a guarantee.")
-        st.subheader("Backups if your first choice is taken")
+        st.subheader("What your roster needs next")
         st.dataframe(
-            [
-                {
-                    "Order": index + 1,
-                    "Player": row["player_name"],
-                    "Pos": row["position"],
-                    "Team": row["team"],
-                    "ESPN ADP": row["consensus_adp"],
-                    "Season Projection": row["season_projection"],
-                    "VOR": row["expected_vor"],
-                    "Roster/Fall Risk Score": row["pick_score"],
-                    "Why": row["recommendation_reason"],
-                }
-                for index, row in enumerate(plan)
-            ],
+            [{"Position": row["position"], "Have": row["filled"], "Starter target": row["target"], "Need": row["gap"], "Status": row["priority"]} for row in insights["needs"]],
             hide_index=True,
             use_container_width=True,
         )
+        pick_tab, sleeper_tab, strong_tab = st.tabs(["Best picks & backups", "Sleepers", "Strong players"])
+        with pick_tab:
+            st.dataframe(
+                [{"Order": index + 1, "Player": row["player_name"], "Pos": row["position"], "Team": row["team"], "ESPN ADP": row["consensus_adp"], "Projection": row["season_projection"], "VOR": row["expected_vor"], "Fit score": row["pick_score"], "Why": row["recommendation_reason"]} for index, row in enumerate(plan)],
+                hide_index=True,
+                use_container_width=True,
+            )
+        with sleeper_tab:
+            if insights["sleepers"]:
+                st.caption("Sleeper = available later than this pick, positive VOR, and materially better projection value than ESPN ADP implies. It is not a guarantee of a breakout.")
+                st.dataframe(
+                    [{"Player": row["player_name"], "Pos": row["position"], "Team": row["team"], "ESPN ADP": row["consensus_adp"], "Projection": row["season_projection"], "VOR": row["expected_vor"], "ADP value": row["adp_relative_value"]} for row in insights["sleepers"]],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            else:
+                st.info("No remaining player meets the live sleeper threshold right now. Fourth Down will not invent one.")
+        with strong_tab:
+            st.caption("Strong players are the remaining players with the highest projected value over the league-specific replacement level, regardless of your immediate roster need.")
+            st.dataframe(
+                [{"Player": row["player_name"], "Pos": row["position"], "Team": row["team"], "Projection": row["season_projection"], "VOR": row["expected_vor"], "ESPN ADP": row["consensus_adp"], "Tier": row["tier"]} for row in insights["strong"]],
+                hide_index=True,
+                use_container_width=True,
+            )
     else:
         st.info("ESPN has not supplied enough live ADP and season-projection data to make a draft recommendation.")
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted_ids)

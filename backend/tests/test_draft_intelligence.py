@@ -99,6 +99,34 @@ def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):
     assert all("ESPN ADP" in row["recommendation_reason"] for row in plan)
 
 
+def test_draft_insights_are_roster_and_pick_aware(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(18 + index * 8)
+        player.season_projection = player.mean * 14
+    settings = DraftSettings(league_size=len(league.teams), current_pick=25, next_pick=40)
+    insights = DraftIntelligenceService(tmp_path).draft_insights(
+        league,
+        settings,
+        drafted_ids=set(),
+        user_drafted_positions=["RB", "WR"],
+    )
+    assert insights["best"]
+    assert insights["strong"]
+    assert insights["round"] == 1 + (settings.current_pick - 1) // settings.league_size
+    assert {row["position"] for row in insights["needs"]} == {"QB", "RB", "WR", "TE"}
+    assert next(row for row in insights["needs"] if row["position"] == "RB")["filled"] == 1
+    assert all(row["expected_vor"] > 0 for row in insights["sleepers"])
+    assert all(row["consensus_adp"] > settings.current_pick for row in insights["sleepers"])
+
+
+def test_draft_insights_return_no_fake_groups_without_live_fields(tmp_path):
+    insights = DraftIntelligenceService(tmp_path).draft_insights(
+        demo_league(), DraftSettings(), drafted_ids=set(), user_drafted_positions=[]
+    )
+    assert insights == {"needs": [], "best": [], "strong": [], "sleepers": []}
+
+
 def test_drafted_players_are_removed(tmp_path):
     dataset = build_draft_dataset(load_csv(ADP), load_csv(OUTCOMES))
     train_draft_artifact(dataset, tmp_path)
