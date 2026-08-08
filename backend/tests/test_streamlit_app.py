@@ -36,7 +36,8 @@ def test_streamlit_app_does_not_load_shared_espn_cookies_from_streamlit_secrets(
 
 
 def test_streamlit_starts_disconnected_without_displaying_demo_league():
-    app = AppTest.from_file("streamlit_app.py", default_timeout=30).run()
+    app_path = Path(__file__).resolve().parents[2] / "streamlit_app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
     assert not app.exception
     rendered = "\n".join(item.value for item in app.markdown)
     assert "The Sunday League" not in rendered
