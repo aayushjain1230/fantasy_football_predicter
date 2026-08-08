@@ -85,6 +85,19 @@ def test_missing_live_espn_draft_fields_returns_no_board(tmp_path):
     assert board == []
 
 
+def test_espn_rank_produces_board_when_projection_and_adp_are_missing(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.espn_rank = index
+    board = DraftIntelligenceService(tmp_path).current_board(
+        league, DraftSettings(current_pick=1, next_pick=24), drafted_ids=set()
+    )
+    assert board
+    assert board[0]["consensus_adp"] == 1
+    assert board[0]["season_projection"] is None
+    assert board[0]["confidence"] == "ESPN live draft rank; season projection unavailable"
+
+
 def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):
     league = demo_league()
     for index, player in enumerate(league.free_agents, 1):
@@ -125,6 +138,17 @@ def test_draft_insights_return_no_fake_groups_without_live_fields(tmp_path):
         demo_league(), DraftSettings(), drafted_ids=set(), user_drafted_positions=[]
     )
     assert insights == {"needs": [], "best": [], "strong": [], "sleepers": []}
+
+
+def test_overall_pick_plan_maps_targets_to_snake_slot(tmp_path):
+    league = demo_league()
+    for index, player in enumerate(league.free_agents, 1):
+        player.average_draft_position = float(index * 5)
+        player.season_projection = player.mean * 14
+    plan = DraftIntelligenceService(tmp_path).overall_pick_plan(league, draft_slot=2, rounds=3)
+    assert [row["overall_pick"] for row in plan] == [2, 7, 10][: len(plan)]
+    assert len({row["player_id"] for row in plan}) == len(plan)
+    assert all(len(row["backups"]) <= 3 for row in plan)
 
 
 def test_drafted_players_are_removed(tmp_path):

@@ -603,14 +603,24 @@ def draft_settings_from_state(league) -> DraftSettings:
 
 
 def page_draft_intelligence(league) -> None:
-    section_header("Draft Board", "Contextual draft recommendations and ADP-relative value.")
+    section_header("Pre-Draft Pick Plan", "Your recommended targets before the draft starts, mapped to your snake-draft position.")
     settings = draft_settings_from_state(league)
     drafted = {pick["player_id"] for pick in st.session_state.draft_picks}
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted)
-    st.caption("Uses only the connected ESPN player pool, ESPN ADP, ESPN rankings, and ESPN season projections.")
+    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=10)
+    st.caption("Uses the connected ESPN draft pool, ESPN ADP when available, ESPN draft rank, and ESPN season projections when available.")
     if not board:
-        st.info("ESPN did not provide both ADP and a season projection for any remaining QB/RB/WR/TE player, so no draft recommendation is shown.")
+        st.info("ESPN did not return ADP or a draft rank for the remaining QB/RB/WR/TE player pool. Reconnect shortly before the draft so ESPN's current draft data can be loaded.")
         return
+    if plan:
+        st.subheader(f"Your first {len(plan)} planned picks from slot {int(st.session_state.draft_slot)}")
+        st.dataframe(
+            [{"Round": row["round"], "Overall pick": row["overall_pick"], "Target": row["player_name"], "Pos": row["position"], "Team": row["team"], "ESPN ADP/rank": row["consensus_adp"], "Projection": row["season_projection"], "Backups": ", ".join(row["backups"])} for row in plan],
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption("This is a pre-draft plan, not a claim that each player will remain available. The Live Draft tab recalculates from the players you record as selected.")
+    st.subheader("Overall remaining board")
     st.dataframe(
         [
             {
@@ -638,7 +648,7 @@ def page_draft_intelligence(league) -> None:
     c3.metric("ADP Value", selected.get("adp_relative_value", "n/a"))
     c4.metric("ESPN ADP", selected.get("consensus_adp", "n/a"))
     st.write("Explanation")
-    st.write("- Expected VOR compares modeled season value with league replacement level.")
+    st.write("- Expected VOR compares ESPN season projection with league replacement level when that projection is available.")
     st.write("- ADP-relative value compares ESPN's season projection with the live ESPN player pool's replacement level and draft cost.")
     st.write("- No next-pick probability is shown because ESPN does not provide a live probability that a player survives to your next pick.")
 
@@ -1159,12 +1169,12 @@ def page_league(league) -> None:
 
 def page_draft_context(league) -> None:
     st.header("Draft")
-    st.caption("Live ESPN draft assistant. Track every pick to continuously update the best choice and backups for your draft position.")
-    tabs = st.tabs(["Draft Room", "Full Board"])
+    st.caption("Start with your slot-based overall pick plan, then use Live Draft to recalculate after every selection.")
+    tabs = st.tabs(["Overall Pick Plan", "Live Draft"])
     with tabs[0]:
-        page_draft_room(league)
-    with tabs[1]:
         page_draft_intelligence(league)
+    with tabs[1]:
+        page_draft_room(league)
 
 
 def page_settings(league) -> None:

@@ -396,8 +396,7 @@ class DraftIntelligenceService:
             for player in league.free_agents
             if player.id not in drafted_ids
             and player.position in {"QB", "RB", "WR", "TE"}
-            and player.average_draft_position is not None
-            and player.season_projection is not None
+            and (player.average_draft_position is not None or player.espn_rank is not None)
         ]
         if not players:
             return []
@@ -407,28 +406,45 @@ class DraftIntelligenceService:
         }
         base_rows = []
         for player in players:
-            season_value = float(player.season_projection or 0)
-            vor = season_value - replacement.get(player.position, 0)
+            season_value = float(player.season_projection) if player.season_projection is not None else None
+            vor = season_value - replacement.get(player.position, 0) if season_value is not None else None
+            market_pick = float(player.average_draft_position or player.espn_rank or 9999)
             base_rows.append(
                 {
                     "player_id": player.id,
                     "player_name": player.name,
                     "position": player.position,
                     "team": player.team,
-                    "consensus_adp": round(float(player.average_draft_position), 2),
+                    "consensus_adp": round(market_pick, 2),
+                    "adp_available": player.average_draft_position is not None,
                     "espn_rank": player.espn_rank,
                     "percent_owned": player.percent_owned,
-                    "season_projection": round(season_value, 2),
-                    "expected_vor": round(vor, 2),
+                    "season_projection": round(season_value, 2) if season_value is not None else None,
+                    "expected_vor": round(vor, 2) if vor is not None else None,
                 }
             )
-        by_value = sorted(base_rows, key=lambda row: (row["expected_vor"], -row["consensus_adp"]), reverse=True)
+        projected = [row for row in base_rows if row["expected_vor"] is not None]
+        if projected:
+            projected_order = sorted(projected, key=lambda row: row["expected_vor"], reverse=True)
+            projection_rank = {row["player_id"]: rank for rank, row in enumerate(projected_order, 1)}
+            for row in base_rows:
+                market_rank = row["consensus_adp"]
+                row["composite_rank"] = (market_rank + projection_rank.get(row["player_id"], market_rank)) / 2
+        else:
+            for row in base_rows:
+                row["composite_rank"] = row["consensus_adp"]
+        by_value = sorted(base_rows, key=lambda row: (row["composite_rank"], row["consensus_adp"]))
         value_rank = {row["player_id"]: rank for rank, row in enumerate(by_value, 1)}
         for row in base_rows:
             row["value_rank"] = value_rank[row["player_id"]]
             row["adp_relative_value"] = round(row["consensus_adp"] - row["value_rank"], 2)
             row["tier"] = 1 + (row["value_rank"] - 1) // max(1, settings.league_size)
-            row["confidence"] = "ESPN live ADP + season projection"
+            if row["season_projection"] is not None and row["adp_available"]:
+                row["confidence"] = "ESPN live ADP + season projection"
+            elif row["season_projection"] is not None:
+                row["confidence"] = "ESPN draft rank + season projection"
+            else:
+                row["confidence"] = "ESPN live draft rank; season projection unavailable"
             row["availability_method"] = "ESPN average draft position; no fabricated next-pick probability"
             row["fallback_used"] = False
         return sorted(base_rows, key=lambda row: (row["value_rank"], row["consensus_adp"]))
@@ -460,13 +476,14 @@ class DraftIntelligenceService:
             need_bonus = min(3.0, need * 1.25)
             urgency = max(0.0, min(4.0, (settings.next_pick - row["consensus_adp"]) / max(2, settings.league_size)))
             value_score = max(-4.0, min(6.0, row["adp_relative_value"] / max(2, settings.league_size / 2)))
-            score = row["expected_vor"] / 20 + need_bonus + urgency + value_score
+            projection_component = row["expected_vor"] / 20 if row["expected_vor"] is not None else max(0, 4 - row["consensus_adp"] / max(12, settings.league_size * 2))
+            score = projection_component + need_bonus + urgency + value_score
             reason = (
                 f"ESPN ADP {row['consensus_adp']}; value rank {row['value_rank']}; "
                 f"{position} roster need {need}; next scheduled pick {settings.next_pick}."
             )
             scored.append({**row, "pick_score": round(score, 2), "recommendation_reason": reason})
-        return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"]), reverse=True)[: backup_count + 1]
+        return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"] or 0), reverse=True)[: backup_count + 1]
 
     def draft_insights(
         self,
@@ -499,7 +516,7 @@ class DraftIntelligenceService:
             filled = counts.get(position, 0)
             gap = max(0, target - filled)
             board_at_position = [row for row in board if row["position"] == position]
-            top_vor = board_at_position[0]["expected_vor"] if board_at_position else 0
+            top_vor = next((row["expected_vor"] for row in board_at_position if row["expected_vor"] is not None), 0)
             priority_score = gap * 10 + top_vor / 20
             if gap:
                 label = "STARTER NEEDED"
@@ -512,11 +529,12 @@ class DraftIntelligenceService:
         needs.sort(key=lambda row: (row["priority_score"], row["gap"]), reverse=True)
 
         plan = self.pick_plan(league, settings, drafted_ids, user_drafted_positions, backup_count=9)
-        strong = sorted(board, key=lambda row: (row["expected_vor"], -row["consensus_adp"]), reverse=True)[:8]
+        strong = sorted(board, key=lambda row: row["value_rank"])[:8]
         sleeper_pool = [
             row for row in board
             if row["adp_relative_value"] >= max(6, settings.league_size / 2)
             and row["consensus_adp"] >= settings.current_pick + max(6, settings.league_size // 2)
+            and row["expected_vor"] is not None
             and row["expected_vor"] > 0
         ]
         sleepers = sorted(sleeper_pool, key=lambda row: (row["adp_relative_value"], row["expected_vor"]), reverse=True)[:8]
@@ -528,6 +546,45 @@ class DraftIntelligenceService:
             "round": round_number,
             "method": "Live ESPN season projection, ADP, value over replacement, roster slots, and recorded picks",
         }
+
+    def overall_pick_plan(
+        self,
+        league: League,
+        draft_slot: int,
+        rounds: int = 8,
+        keeper_positions: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Create a pre-draft slot plan; availability is an ADP window, not a promise."""
+        league_size = max(2, len(league.teams) or 12)
+        draft_slot = min(max(1, draft_slot), league_size)
+        chosen_ids: set[str] = set()
+        positions = list(keeper_positions or [])
+        recommendations: list[dict[str, Any]] = []
+        search_from = 1
+        for round_number in range(1, rounds + 1):
+            pick_number = snake_next_pick(search_from, draft_slot, league_size)
+            next_pick = snake_next_pick(pick_number + 1, draft_slot, league_size)
+            board = self.current_board(league, DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick), chosen_ids)
+            likely_gone = {
+                row["player_id"]
+                for row in board
+                if row["consensus_adp"] < pick_number - max(3, league_size * 0.45)
+            }
+            plan = self.pick_plan(
+                league,
+                DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick),
+                chosen_ids | likely_gone,
+                positions,
+                backup_count=3,
+            )
+            if not plan:
+                break
+            choice = plan[0]
+            recommendations.append({**choice, "round": round_number, "overall_pick": pick_number, "backups": [row["player_name"] for row in plan[1:4]]})
+            chosen_ids.add(choice["player_id"])
+            positions.append(choice["position"])
+            search_from = pick_number + 1
+        return recommendations
 
 
 def replacement_level(league: League, position: str, *, season: bool = False) -> float:

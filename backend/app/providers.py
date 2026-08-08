@@ -26,7 +26,7 @@ def _espn_player_values(source: dict, current_period: int) -> dict[str, float | 
     adp = ownership.get("averageDraftPosition")
     percent_owned = ownership.get("percentOwned")
     rank_types = source.get("draftRanksByRankType") or {}
-    rank_row = rank_types.get("PPR") or rank_types.get("STANDARD") or {}
+    rank_row = rank_types.get("PPR") or rank_types.get("HALF") or rank_types.get("STANDARD") or next(iter(rank_types.values()), {})
     rank = rank_row.get("rank")
     return {
         "weekly_projection": weekly_projection,
@@ -99,7 +99,9 @@ async def connect_espn(
         raise ValueError("TEAM_NOT_FOUND")
     free_agents=[]
     try:
-        fantasy_filter={"players":{"filterStatus":{"value":["FREEAGENT","WAIVERS"]},"limit":200,"sortPercOwned":{"sortPriority":1,"sortAsc":False}}}
+        scoring_items_for_draft = settings.get("scoringSettings", {}).get("scoringItems", [])
+        scoring_type = "PPR" if any(int(item.get("statId", -1)) == 53 and float(item.get("points", 0) or 0) > 0 for item in scoring_items_for_draft) else "STANDARD"
+        fantasy_filter={"players":{"limit":1500,"sortDraftRanks":{"sortPriority":1,"sortAsc":True,"value":scoring_type}}}
         async with httpx.AsyncClient(timeout=15,cookies=cookies) as client:
             pool_response=await client.get(url,params={"view":"kona_player_info"},headers={"X-Fantasy-Filter":json.dumps(fantasy_filter)})
         pool_response.raise_for_status()

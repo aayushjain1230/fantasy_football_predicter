@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 
@@ -96,6 +97,21 @@ def test_public_espn_response_normalization(monkeypatch):
     assert league.schedule[0].is_complete
     assert league.schedule[1].home_team_id == "1"
     assert all(call["cookies"] == {} for call in FakeClient.calls)
+    pool_call = next(call for call in FakeClient.calls if call["headers"])
+    draft_filter = json.loads(pool_call["headers"]["X-Fantasy-Filter"])["players"]
+    assert draft_filter["limit"] == 1500
+    assert "filterStatus" not in draft_filter
+    assert "sortDraftRanks" in draft_filter
+
+
+def test_espn_draft_rank_is_parsed_when_adp_and_projection_are_missing():
+    values = providers._espn_player_values(
+        {"draftRanksByRankType": {"PPR": {"rank": 17}}, "stats": []},
+        current_period=1,
+    )
+    assert values["espn_rank"] == 17
+    assert values["average_draft_position"] is None
+    assert values["season_projection"] is None
 
 
 def test_private_auth_error_is_not_decorated_with_secrets(monkeypatch):
