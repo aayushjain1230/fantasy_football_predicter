@@ -7,7 +7,8 @@ def test_streamlit_app_imports_without_running():
     import streamlit_app
 
     assert "Home" in streamlit_app.PAGES
-    assert list(streamlit_app.PAGES) == ["Home", "My Team", "Players", "League", "Settings"]
+    assert list(streamlit_app.PAGES) == ["Home", "My Team", "Players", "Draft", "League", "Settings"]
+    assert streamlit_app.PAGES["Draft"] is streamlit_app.page_draft_context
     forbidden = {
         "Lineup Lab",
         "Waiver Lab",

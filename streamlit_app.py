@@ -132,6 +132,8 @@ def ensure_state() -> None:
         st.session_state.draft_slot = 6
     if "draft_strategy" not in st.session_state:
         st.session_state.draft_strategy = "balanced"
+    if "draft_workspace" not in st.session_state:
+        st.session_state.draft_workspace = "Who Should I Draft?"
     if "draft_league_size" not in st.session_state:
         st.session_state.draft_league_size = None
     if "draft_rounds" not in st.session_state:
@@ -405,6 +407,10 @@ def page_home(league) -> None:
         f"{league.name} | Week {league.week} | {league_label(league)}",
         [status_badge(league_label(league))],
     )
+    if st.button("Who Should I Draft?", type="primary", use_container_width=True):
+        st.session_state.draft_workspace = "Who Should I Draft?"
+        st.session_state.pending_page = "Draft"
+        st.rerun()
     brief = build_weekly_brief(league)
     metric_grid(
         [
@@ -1406,11 +1412,16 @@ def page_draft_context(league) -> None:
     config = build_draft_configuration(league, league_size=league_size, draft_slot=int(st.session_state.draft_slot), current_overall_pick=int(st.session_state.current_pick), total_rounds=int(st.session_state.draft_rounds))
     slot_summary = " · ".join(f"{config.starting_slots.count(slot)} {slot}" for slot in dict.fromkeys(config.starting_slots))
     st.caption(f"{config.league_size} managers · {config.draft_type.title()} · Seat {config.draft_slot} · {config.scoring_format} · {slot_summary} · {config.bench_slots} bench")
-    tabs = st.tabs(["Overall Pick Plan", "Live Draft"])
-    with tabs[0]:
-        page_draft_intelligence(league)
-    with tabs[1]:
+    workspace = st.radio(
+        "Draft workspace",
+        ["Who Should I Draft?", "Overall Pick Plan"],
+        key="draft_workspace",
+        horizontal=True,
+    )
+    if workspace == "Who Should I Draft?":
         page_draft_room(league)
+    else:
+        page_draft_intelligence(league)
 
 
 def page_settings(league) -> None:
@@ -1685,6 +1696,7 @@ PAGES = {
     "Home": page_home,
     "My Team": page_my_team,
     "Players": page_players,
+    "Draft": page_draft_context,
     "League": page_league,
     "Settings": page_settings,
 }
@@ -1696,9 +1708,7 @@ def visible_pages() -> dict[str, object]:
             "Home": page_home,
             "Settings": page_settings,
         }
-    pages = dict(PAGES)
-    pages["Draft"] = page_draft_context
-    return pages
+    return dict(PAGES)
 
 
 def main() -> None:
