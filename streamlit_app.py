@@ -358,6 +358,10 @@ def connect_error(exc: Exception) -> str:
         return "Private league authentication requires both espn_s2 and SWID. Enter both values or leave both blank."
     if str(exc) == "INVALID_ESPN_AUTH":
         return "The ESPN credential value is not valid. Copy fresh espn_s2 and SWID cookie values and try again."
+    if str(exc) == "ESPN_AUTH_RESPONSE_INVALID":
+        return "ESPN returned a sign-in or non-league response. The cookies are expired, copied from different ESPN sessions, or do not have access to this league. Sign out and back into ESPN, then copy fresh espn_s2 and SWID values from the same browser session."
+    if str(exc) == "ESPN_RESPONSE_INVALID":
+        return "ESPN returned an unexpected response instead of league data. Confirm the league season and try again."
     return "The league could not be connected. Check the league ID, season, team ID, and private-league credentials."
 
 
@@ -404,26 +408,26 @@ def page_home(league) -> None:
 def page_connect() -> None:
     st.header("Connect League")
     st.write("Enter a numeric ESPN league ID. Private leagues require both ESPN browser-cookie values.")
-    with st.form("connect", clear_on_submit=True):
+    with st.form("connect", clear_on_submit=False):
         league_id = st.text_input("League ID", value="")
         season = st.number_input("Season", min_value=2020, max_value=2030, value=2026, step=1)
         team_id = st.text_input("Team ID (optional)", value="")
         with st.expander("Private league authentication"):
             st.caption(
                 "Only enter credentials on a deployment you trust. Fourth Down sends them to ESPN for this request "
-                "and does not save them to its database, environment, logs, URL, or connected league object."
+                "and keeps them only in this isolated Streamlit session for explicit draft refreshes. They are never saved to the database, environment, logs, URL, or exports and are wiped on disconnect/reset."
             )
             espn_s2 = st.text_input(
                 "espn_s2 cookie",
                 value="",
                 type="password",
-                help="Copy the complete espn_s2 value from the cookies for espn.com in your signed-in browser.",
+                help="Copy the complete espn_s2 value from espn.com. Either the raw value or an espn_s2=value fragment is accepted.",
             )
             espn_swid = st.text_input(
                 "SWID cookie",
                 value="",
                 type="password",
-                help="Copy the SWID value, including braces if ESPN shows them.",
+                help="Copy the SWID value from the same ESPN browser session. Raw UUID, {UUID}, or SWID={UUID} formats are accepted.",
             )
         submitted = st.form_submit_button("Connect league")
     if submitted:

@@ -10,6 +10,23 @@ from .config import CONFIG
 from .domain import DataState, League, LeagueRuleSet, Matchup, ProviderStatus
 
 
+def normalize_espn_cookie(value: str | None, cookie_name: str) -> str:
+    """Accept a raw cookie value or a copied name=value fragment without logging it."""
+    text = (value or "").strip().strip('"').strip("'")
+    if not text:
+        return ""
+    for fragment in text.split(";"):
+        fragment = fragment.strip()
+        if "=" in fragment:
+            name, candidate = fragment.split("=", 1)
+            if name.strip().lower() == cookie_name.lower():
+                text = candidate.strip().strip('"').strip("'")
+                break
+    if cookie_name.lower() == "swid" and text and not (text.startswith("{") and text.endswith("}")):
+        text = "{" + text.strip("{}") + "}"
+    return text
+
+
 def _espn_player_values(source: dict, current_period: int) -> dict[str, float | int | None]:
     weekly_projection: float | None = None
     season_projection: float | None = None
@@ -45,8 +62,8 @@ async def connect_espn(
     espn_s2: str | None = None,
     espn_swid: str | None = None,
 ) -> League:
-    supplied_s2 = (espn_s2 or "").strip()
-    supplied_swid = (espn_swid or "").strip()
+    supplied_s2 = normalize_espn_cookie(espn_s2, "espn_s2")
+    supplied_swid = normalize_espn_cookie(espn_swid, "SWID")
     if bool(supplied_s2) != bool(supplied_swid):
         raise ValueError("INCOMPLETE_ESPN_AUTH")
     if len(supplied_s2) > 4096 or len(supplied_swid) > 256:
@@ -55,13 +72,18 @@ async def connect_espn(
     if supplied_s2 and supplied_swid:
         cookies = {"espn_s2": supplied_s2, "SWID": supplied_swid}
     elif CONFIG.espn_s2 and CONFIG.espn_swid and not CONFIG.cloud_mode:
-        cookies = {"espn_s2": CONFIG.espn_s2, "SWID": CONFIG.espn_swid}
+        cookies = {"espn_s2": normalize_espn_cookie(CONFIG.espn_s2, "espn_s2"), "SWID": normalize_espn_cookie(CONFIG.espn_swid, "SWID")}
     url = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{league_id}"
     params = [("view", v) for v in ("mSettings", "mTeam", "mRoster", "mMatchup", "mDraftDetail")]
-    async with httpx.AsyncClient(timeout=15, cookies=cookies) as client:
+    async with httpx.AsyncClient(timeout=15, cookies=cookies, follow_redirects=True) as client:
         response = await client.get(url, params=params)
     response.raise_for_status()
-    raw = response.json()
+    try:
+        raw = response.json()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ESPN_AUTH_RESPONSE_INVALID" if cookies else "ESPN_RESPONSE_INVALID") from exc
+    if not isinstance(raw, dict) or (cookies and not raw.get("settings") and not raw.get("teams")):
+        raise ValueError("ESPN_AUTH_RESPONSE_INVALID" if cookies else "ESPN_RESPONSE_INVALID")
     # ESPN's player pool needs a separate paged call; connection returns a safe normalized core.
     position_map = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
     pro_team_map = {1:"ATL",2:"BUF",3:"CHI",4:"CIN",5:"CLE",6:"DAL",7:"DEN",8:"DET",9:"GB",10:"TEN",11:"IND",12:"KC",13:"LV",14:"LAR",15:"MIA",16:"MIN",17:"NE",18:"NO",19:"NYG",20:"NYJ",21:"PHI",22:"ARI",23:"PIT",24:"LAC",25:"SF",26:"SEA",27:"TB",28:"WAS",29:"CAR",30:"JAX",33:"BAL",34:"HOU"}
@@ -102,7 +124,7 @@ async def connect_espn(
         scoring_items_for_draft = settings.get("scoringSettings", {}).get("scoringItems", [])
         scoring_type = "PPR" if any(int(item.get("statId", -1)) == 53 and float(item.get("points", 0) or 0) > 0 for item in scoring_items_for_draft) else "STANDARD"
         fantasy_filter={"players":{"limit":1500,"sortDraftRanks":{"sortPriority":1,"sortAsc":True,"value":scoring_type}}}
-        async with httpx.AsyncClient(timeout=15,cookies=cookies) as client:
+        async with httpx.AsyncClient(timeout=15,cookies=cookies,follow_redirects=True) as client:
             pool_response=await client.get(url,params={"view":"kona_player_info"},headers={"X-Fantasy-Filter":json.dumps(fantasy_filter)})
         pool_response.raise_for_status()
         rostered={player.id for team in teams for player in team.players}

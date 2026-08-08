@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from app.domain import DataState
 from app import providers
@@ -156,6 +157,35 @@ def test_private_credentials_are_sent_only_as_espn_cookies(monkeypatch):
         call["cookies"] == {"espn_s2": "private-s2", "SWID": "{private-swid}"}
         for call in FakeClient.calls
     )
+
+
+def test_copied_cookie_fragments_are_normalized(monkeypatch):
+    FakeClient.calls = []
+    monkeypatch.setattr(providers.httpx, "AsyncClient", FakeClient)
+    asyncio.run(
+        providers.connect_espn(
+            "123",
+            2026,
+            espn_s2="espn_s2=private-s2; Path=/",
+            espn_swid="SWID=private-swid; Domain=.espn.com",
+        )
+    )
+    assert all(call["cookies"] == {"espn_s2": "private-s2", "SWID": "{private-swid}"} for call in FakeClient.calls)
+
+
+def test_private_login_page_becomes_safe_auth_error(monkeypatch):
+    class HtmlResponse(FakeResponse):
+        def json(self):
+            raise ValueError("not json private-s2")
+
+    class HtmlClient(FakeClient):
+        async def get(self, *args, **kwargs):
+            return HtmlResponse("<html>login</html>")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", HtmlClient)
+    with pytest.raises(ValueError, match="ESPN_AUTH_RESPONSE_INVALID") as captured:
+        asyncio.run(providers.connect_espn("123", 2026, espn_s2="private-s2", espn_swid="private-swid"))
+    assert "private-s2" not in str(captured.value)
 
 
 def test_private_credentials_require_both_values():
