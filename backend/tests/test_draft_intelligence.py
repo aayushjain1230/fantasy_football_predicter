@@ -95,10 +95,13 @@ def test_training_artifact_probabilities_sum_and_board_tiers(tmp_path):
     assert "tier" in row
 
 
-def test_missing_live_espn_draft_fields_returns_no_board(tmp_path):
+def test_live_pool_membership_and_order_produce_board_without_optional_fields(tmp_path):
+    league = demo_league()
+    league.draft_pool = list(league.free_agents)
     service = DraftIntelligenceService(tmp_path)
-    board = service.current_board(demo_league(), DraftSettings(current_pick=1, next_pick=24), drafted_ids=set())
-    assert board == []
+    board = service.current_board(league, DraftSettings(current_pick=1, next_pick=24), drafted_ids=set())
+    assert board
+    assert board[0]["market_source"] == "ESPN live player-pool order"
 
 
 def test_espn_rank_produces_board_when_projection_and_adp_are_missing(tmp_path):
@@ -146,13 +149,13 @@ def test_draft_board_uses_full_pool_not_waiver_pool(tmp_path):
     assert [row["player_id"] for row in board] == [candidate.id]
 
 
-def test_projection_or_ownership_can_power_honest_fallback_board(tmp_path):
+def test_live_pool_order_takes_precedence_over_optional_fallback_signals(tmp_path):
     league = demo_league()
     projection_player = league.free_agents[0].model_copy(update={"average_draft_position": None, "espn_rank": None, "season_projection": 210.0})
     ownership_player = league.free_agents[1].model_copy(update={"average_draft_position": None, "espn_rank": None, "season_projection": None, "percent_owned": 88.0})
     league.draft_pool = [projection_player, ownership_player]
     board = DraftIntelligenceService(tmp_path).current_board(league, DraftSettings(current_pick=1, next_pick=12), set())
-    assert {row["market_source"] for row in board} == {"ESPN season projection order", "ESPN ownership order"}
+    assert {row["market_source"] for row in board} == {"ESPN live player-pool order"}
 
 
 def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):

@@ -586,18 +586,20 @@ class DraftIntelligenceService:
 
     def current_board(self, league: League, settings: DraftSettings, drafted_ids: set[str] | None = None) -> list[dict[str, Any]]:
         drafted_ids = drafted_ids or set()
+        using_live_draft_pool = bool(league.draft_pool)
         draftable_players = league.draft_pool or league.free_agents
+        pool_rank_by_id = {player.id: rank for rank, player in enumerate(draftable_players, 1)}
         players = [
             player
             for player in draftable_players
             if player.id not in drafted_ids
             and player.position in {"QB", "RB", "WR", "TE"}
             and (
-                player.average_draft_position is not None
+                using_live_draft_pool
+                or player.average_draft_position is not None
                 or player.espn_rank is not None
                 or player.season_projection is not None
                 or player.percent_owned is not None
-                or player.draft_pool_rank is not None
             )
         ]
         if not players:
@@ -610,7 +612,7 @@ class DraftIntelligenceService:
             players,
             key=lambda player: (
                 player.average_draft_position is None and player.espn_rank is None,
-                float(player.average_draft_position or player.espn_rank or player.draft_pool_rank or 9999),
+                float(player.average_draft_position or player.espn_rank or player.draft_pool_rank or pool_rank_by_id[player.id]),
                 -float(player.season_projection or 0),
                 -float(player.percent_owned or 0),
             ),
@@ -620,8 +622,9 @@ class DraftIntelligenceService:
         for player in players:
             season_value = float(player.season_projection) if player.season_projection is not None else None
             vor = season_value - replacement.get(player.position, 0) if season_value is not None else None
-            market_pick = float(player.average_draft_position or player.espn_rank or player.draft_pool_rank or fallback_rank[player.id])
-            market_source = "ESPN ADP" if player.average_draft_position is not None else "ESPN draft rank" if player.espn_rank is not None else "ESPN live player-pool order" if player.draft_pool_rank is not None else "ESPN season projection order" if player.season_projection is not None else "ESPN ownership order"
+            live_pool_rank = player.draft_pool_rank or (pool_rank_by_id[player.id] if using_live_draft_pool else None)
+            market_pick = float(player.average_draft_position or player.espn_rank or live_pool_rank or fallback_rank[player.id])
+            market_source = "ESPN ADP" if player.average_draft_position is not None else "ESPN draft rank" if player.espn_rank is not None else "ESPN live player-pool order" if live_pool_rank is not None else "ESPN season projection order" if player.season_projection is not None else "ESPN ownership order"
             base_rows.append(
                 {
                     "player_id": player.id,
