@@ -114,6 +114,29 @@ def test_espn_rank_produces_board_when_projection_and_adp_are_missing(tmp_path):
     assert board[0]["confidence"] == "ESPN draft rank; season projection unavailable"
 
 
+def test_live_espn_pool_order_produces_board_when_optional_fields_are_missing(tmp_path):
+    league = demo_league()
+    league.draft_pool = [
+        player.model_copy(
+            update={
+                "average_draft_position": None,
+                "espn_rank": None,
+                "season_projection": None,
+                "percent_owned": None,
+                "draft_pool_rank": index,
+            }
+        )
+        for index, player in enumerate(league.free_agents, 1)
+    ]
+    board = DraftIntelligenceService(tmp_path).current_board(
+        league, DraftSettings(current_pick=1, next_pick=24), drafted_ids=set()
+    )
+    assert board
+    assert board[0]["consensus_adp"] == 1
+    assert board[0]["market_source"] == "ESPN live player-pool order"
+    assert board[0]["confidence"] == "ESPN live player-pool order; season projection unavailable"
+
+
 def test_draft_board_uses_full_pool_not_waiver_pool(tmp_path):
     league = demo_league()
     candidate = league.free_agents[0].model_copy(update={"average_draft_position": 8.0, "season_projection": 220.0, "rostered": True})

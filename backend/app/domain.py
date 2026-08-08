@@ -38,6 +38,7 @@ class Player(BaseModel):
     average_draft_position: float | None = None
     percent_owned: float | None = None
     espn_rank: int | None = None
+    draft_pool_rank: int | None = None
 
 
 class Team(BaseModel):

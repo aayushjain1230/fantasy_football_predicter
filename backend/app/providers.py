@@ -46,7 +46,9 @@ def _espn_pool_player(item: dict) -> dict:
     return {}
 
 
-def _espn_player_values(source: dict, current_period: int) -> dict[str, float | int | None]:
+def _espn_player_values(source: dict, current_period: int, item: dict | None = None) -> dict[str, float | int | None]:
+    item = item or {}
+    entry = item.get("playerPoolEntry") if isinstance(item.get("playerPoolEntry"), dict) else {}
     weekly_projection: float | None = None
     season_projection: float | None = None
     for stat in source.get("stats", []):
@@ -58,10 +60,10 @@ def _espn_player_values(source: dict, current_period: int) -> dict[str, float | 
             weekly_projection = max(weekly_projection or 0, value)
         if period == 0 and value > 0:
             season_projection = max(season_projection or 0, value)
-    ownership = source.get("ownership") or {}
+    ownership = source.get("ownership") or entry.get("ownership") or item.get("ownership") or {}
     adp = ownership.get("averageDraftPosition")
     percent_owned = ownership.get("percentOwned")
-    rank_types = source.get("draftRanksByRankType") or {}
+    rank_types = source.get("draftRanksByRankType") or entry.get("draftRanksByRankType") or item.get("draftRanksByRankType") or {}
     rank_row = rank_types.get("PPR") or rank_types.get("HALF") or rank_types.get("STANDARD") or next(iter(rank_types.values()), {})
     rank = rank_row.get("rank")
     return {
@@ -172,7 +174,7 @@ async def connect_espn(
     if pool_items is not None:
         pool_diagnostics["raw_player_count"] = len(pool_items)
         rostered={player.id for team in teams for player in team.players}
-        for item in pool_items:
+        for pool_rank, item in enumerate(pool_items, 1):
             try:
                 source=_espn_pool_player(item)
                 if not source:
@@ -186,12 +188,12 @@ async def connect_espn(
                 if not position:
                     pool_diagnostics["rejected"]["unsupported_position"] = pool_diagnostics["rejected"].get("unsupported_position", 0) + 1
                     continue
-                values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)))
+                values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)), item)
                 projected = values["weekly_projection"]
                 eligible={position}
                 if position in {"RB","WR","TE"}: eligible.add("FLEX")
                 if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
-                draft_player=__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,float(projected or 0)),stdev=max(.1,float(projected or 0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=pid in rostered,projection_available=projected is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"])
+                draft_player=__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,float(projected or 0)),stdev=max(.1,float(projected or 0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=pid in rostered,projection_available=projected is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"],draft_pool_rank=pool_rank)
                 draft_pool.append(draft_player)
                 if pid not in rostered:
                     free_agents.append(draft_player.model_copy(update={"rostered": False}))

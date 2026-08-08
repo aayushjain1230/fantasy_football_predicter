@@ -125,6 +125,22 @@ def test_espn_draft_rank_is_parsed_when_adp_and_projection_are_missing():
     assert values["season_projection"] is None
 
 
+def test_espn_wrapper_ownership_and_rank_are_parsed():
+    values = providers._espn_player_values(
+        {"stats": []},
+        current_period=1,
+        item={
+            "playerPoolEntry": {
+                "ownership": {"averageDraftPosition": 23.5, "percentOwned": 91.2},
+                "draftRanksByRankType": {"PPR": {"rank": 19}},
+            }
+        },
+    )
+    assert values["average_draft_position"] == 23.5
+    assert values["percent_owned"] == 91.2
+    assert values["espn_rank"] == 19
+
+
 def test_private_auth_error_is_not_decorated_with_secrets(monkeypatch):
     class AuthClient(FakeClient):
         async def get(self, *args, **kwargs):
@@ -225,6 +241,7 @@ def test_nested_player_pool_entry_shape_is_normalized(monkeypatch):
     assert diagnostics["raw_player_count"] == 1
     assert diagnostics["normalized_player_count"] == 1
     assert diagnostics["status"] == "LIVE"
+    assert league.draft_pool[0].draft_pool_rank == 1
 
 
 def test_private_login_page_becomes_safe_auth_error(monkeypatch):
