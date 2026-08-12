@@ -957,9 +957,10 @@ class DraftIntelligenceService:
         keeper_positions: list[str] | None = None,
         strategy: str = "balanced",
         draft_type: str | None = None,
+        league_size: int | None = None,
     ) -> list[dict[str, Any]]:
         """Create a pre-draft slot plan; availability is an ADP window, not a promise."""
-        league_size = league_team_count(league)
+        league_size = int(league_size or league_team_count(league))
         draft_slot = min(max(1, draft_slot), league_size)
         chosen_ids: set[str] = set()
         positions = list(keeper_positions or [])

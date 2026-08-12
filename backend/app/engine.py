@@ -158,28 +158,37 @@ def waiver_moves(league: League) -> list[WaiverMove]:
         return []
     before = optimize_lineup(team.players, league.roster_slots, league=league)
     results: list[WaiverMove] = []
+    # ESPN's pool can exceed 1,000 rows. A player outside the best available
+    # options at his position cannot improve the current lineup, so solve only
+    # the top provider-derived candidates. This avoids thousands of redundant
+    # combinatorial lineup searches without inventing or changing player data.
+    ranked_by_position: dict[str, list[Player]] = {}
     for add in league.free_agents:
-        if not add.projection_available:
+        if add.projection_available and add.availability > 0:
+            ranked_by_position.setdefault(add.position, []).append(add)
+    candidates = []
+    for rows in ranked_by_position.values():
+        candidates.extend(sorted(rows, key=lambda p: (p.mean, p.season_projection or 0, p.percent_owned or 0), reverse=True)[:12])
+    for add in candidates:
+        expanded = [*team.players, add]
+        after = optimize_lineup(expanded, league.roster_slots, league=league)
+        if not after.is_complete:
             continue
-        best = None
-        for drop in team.players:
-            if not drop.projection_available:
-                continue
-            after_players = [p for p in team.players if p.id != drop.id] + [add]
-            after = optimize_lineup(after_players, league.roster_slots, league=league)
-            if not after.is_complete:
-                continue
-            gain = after.expected_score - before.expected_score
-            if best is None or gain > best[0]:
-                best = (gain, drop, after)
-        if not best or best[0] <= 0: continue
-        gain, drop, _ = best
+        starter_ids = {entry.player.id for entry in after.starters}
+        safe_drops = [player for player in team.players if player.id not in starter_ids]
+        if not safe_drops:
+            continue
+        drop = min(safe_drops, key=lambda p: (p.season_projection if p.season_projection is not None else p.mean * 17, p.mean))
+        gain = after.expected_score - before.expected_score
+        if gain <= 0:
+            continue
         has_ros = add.season_projection is not None and drop.season_projection is not None
         ros_gain = (add.season_projection - drop.season_projection) if has_ros else 0.0
         drop_safety = _drop_safety(drop, team.players, league)
         faab_guidance = _faab_guidance(league, gain, ros_gain, add.position)
         category = "MUST ADD" if gain >= 4 else "STRONG ADD" if gain >= 2 else "TEAM-NEEDS FIT"
-        results.append(WaiverMove(add=add, drop=drop, weekly_gain=round(gain, 1), ros_gain=round(ros_gain, 1), category=category, confidence=.64 if has_ros else .5, faab_percent=int(faab_guidance["suggested_high_percent"]), reasons=["Compares the best legal lineup before and after the add/drop using ESPN weekly projections.", "Rest-of-season gain uses ESPN season projections when ESPN supplies both values."], risks=["Role, injuries, and free-agent availability can change before waivers clear.", "ESPN season projection unavailable; no rest-of-season advantage is claimed." if not has_ros else "Season projections are estimates, not guarantees."], drop_safety=drop_safety, faab_guidance=faab_guidance))
+        baseline_kind = "clearly labelled ESPN season-average projections" if "season projection" in add.projection_source.lower() or "season projection" in drop.projection_source.lower() else "ESPN weekly projections"
+        results.append(WaiverMove(add=add, drop=drop, weekly_gain=round(gain, 1), ros_gain=round(ros_gain, 1), category=category, confidence=.64 if has_ros and baseline_kind.startswith("ESPN weekly") else .52 if has_ros else .45, faab_percent=int(faab_guidance["suggested_high_percent"]), reasons=[f"Compares the best legal lineup before and after the add/drop using {baseline_kind}.", "Rest-of-season gain uses ESPN season projections when ESPN supplies both values."], risks=["Role, injuries, and free-agent availability can change before waivers clear.", "ESPN season projection unavailable; no rest-of-season advantage is claimed." if not has_ros else "Season projections are estimates, not guarantees."], drop_safety=drop_safety, faab_guidance=faab_guidance))
     return sorted(results, key=lambda m: m.weekly_gain, reverse=True)
 
 

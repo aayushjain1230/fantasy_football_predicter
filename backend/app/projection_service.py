@@ -295,6 +295,7 @@ class ProjectionService:
         context = context or ProjectionContext(week=week or (league.week if league else 0), external_baseline=player.mean)
         if player.projection_source.startswith("ESPN"):
             live = fallback_project(player)
+            season_average = "season projection" in player.projection_source.lower()
             return live.model_copy(
                 update={
                     "week": context.week,
@@ -303,14 +304,15 @@ class ProjectionService:
                     "final_projection": live.mean if player.projection_available else None,
                     "model_name": "espn_live_baseline",
                     "model_version": f"espn-{league.season if league else 'live'}",
-                    "fallback_used": False,
-                    "fallback_reason": "",
-                    "confidence_label": "provider baseline" if player.projection_available else "unavailable",
-                    "data_completeness": 1.0 if player.projection_available else 0.0,
+                    "fallback_used": season_average,
+                    "fallback_reason": "ESPN current-week projection unavailable; using ESPN full-season projection divided by 17" if season_average else "",
+                    "confidence": min(live.confidence, 0.58) if season_average else live.confidence,
+                    "confidence_label": "season-average fallback" if season_average else "provider baseline" if player.projection_available else "unavailable",
+                    "data_completeness": 0.7 if season_average else 1.0 if player.projection_available else 0.0,
                     "missing": live.missing if player.projection_available else ["ESPN weekly projection"],
                     "limitations": [
                         "ESPN projections are provider estimates, not guarantees.",
-                        "Fourth Down does not substitute fixture or synthetic projections when ESPN has no value.",
+                        "A clearly labelled ESPN season-average baseline is used only when ESPN omits the current-week projection." if season_average else "Fourth Down does not substitute fixture or synthetic projections when ESPN has no value.",
                     ],
                 }
             )

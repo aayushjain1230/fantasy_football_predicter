@@ -127,6 +127,28 @@ def test_espn_draft_rank_is_parsed_when_adp_and_projection_are_missing():
     assert values["season_projection"] is None
 
 
+def test_period_zero_season_projection_is_preserved_and_becomes_weekly_fallback():
+    values = providers._espn_player_values(
+        {"stats": [{"scoringPeriodId": 0, "statSourceId": 1, "appliedTotal": 255.0}]},
+        current_period=1,
+    )
+    assert values["weekly_projection"] is None
+    assert values["season_projection"] == 255.0
+    mean, available, source = providers._usable_projection(values)
+    assert mean == 15.0
+    assert available is True
+    assert source == "ESPN season projection (weekly average)"
+
+
+def test_wrapper_stats_are_parsed_when_player_object_has_no_stats():
+    values = providers._espn_player_values(
+        {},
+        current_period=1,
+        item={"playerPoolEntry": {"stats": [{"scoringPeriodId": 0, "statSourceId": 1, "appliedTotal": 170.0}]}},
+    )
+    assert values["season_projection"] == 170.0
+
+
 def test_espn_wrapper_ownership_and_rank_are_parsed():
     values = providers._espn_player_values(
         {"stats": []},

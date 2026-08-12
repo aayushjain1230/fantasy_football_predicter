@@ -51,11 +51,21 @@ def _espn_player_values(source: dict, current_period: int, item: dict | None = N
     entry = item.get("playerPoolEntry") if isinstance(item.get("playerPoolEntry"), dict) else {}
     weekly_projection: float | None = None
     season_projection: float | None = None
-    for stat in source.get("stats", []):
-        if stat.get("statSourceId") != 1:
+    stat_rows: list[dict] = []
+    for container in (source, entry, item):
+        rows = container.get("stats", []) if isinstance(container, dict) else []
+        if isinstance(rows, list):
+            stat_rows.extend(row for row in rows if isinstance(row, dict))
+    for stat in stat_rows:
+        try:
+            stat_source = int(stat.get("statSourceId", -1))
+        except (TypeError, ValueError):
+            continue
+        if stat_source != 1:
             continue
         value = float(stat.get("appliedTotal", 0) or 0)
-        period = int(stat.get("scoringPeriodId", -1) or -1)
+        raw_period = stat.get("scoringPeriodId")
+        period = int(raw_period) if raw_period is not None else -1
         if period == current_period and value > 0:
             weekly_projection = max(weekly_projection or 0, value)
         if period == 0 and value > 0:
@@ -73,6 +83,35 @@ def _espn_player_values(source: dict, current_period: int, item: dict | None = N
         "percent_owned": float(percent_owned) if percent_owned is not None else None,
         "espn_rank": int(rank) if rank not in (None, 0) else None,
     }
+
+
+def _usable_projection(values: dict[str, float | int | None]) -> tuple[float, bool, str]:
+    """Return an honest weekly baseline even when ESPN has not opened a scoring week.
+
+    ESPN commonly omits the current-week projection before Week 1 while still
+    returning its full-season projection.  Treating that player as worth zero
+    made every downstream recommendation disappear.  A season average is a
+    provider-derived fallback, not a matchup forecast, so keep it explicitly
+    labelled and let the UI/model report the lower-confidence source.
+    """
+    weekly = values.get("weekly_projection")
+    if weekly is not None:
+        return max(0.0, float(weekly)), True, "ESPN weekly fantasy projection"
+    season = values.get("season_projection")
+    if season is not None:
+        return max(0.0, float(season) / 17.0), True, "ESPN season projection (weekly average)"
+    return 0.0, False, "ESPN projection unavailable"
+
+
+def _injury_values(source: dict) -> tuple[str, float]:
+    raw = str(source.get("injuryStatus", "ACTIVE") or "ACTIVE").replace("_", " ").upper()
+    if raw in {"ACTIVE", "NORMAL", "HEALTHY"}:
+        return "HEALTHY", 1.0
+    if raw in {"QUESTIONABLE", "DOUBTFUL"}:
+        return raw, 0.7
+    if raw in {"OUT", "INJURY RESERVE", "SUSPENSION"}:
+        return raw, 0.0
+    return raw, 0.9
 
 
 async def connect_espn(
@@ -122,16 +161,18 @@ async def connect_espn(
         players = []
         for entry in t.get("roster", {}).get("entries", []):
             source = entry.get("playerPoolEntry", {}).get("player", {})
-            position = position_map.get(source.get("defaultPositionId"))
+            try:
+                position = position_map.get(int(source.get("defaultPositionId")))
+            except (TypeError, ValueError):
+                position = None
             if not position: continue
             values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)))
-            weekly_projection = values["weekly_projection"]
-            mean = float(weekly_projection or 0)
+            mean, projection_available, projection_source = _usable_projection(values)
             eligible = {position}
             if position in {"RB","WR","TE"}: eligible.add("FLEX")
             if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
-            injury = str(source.get("injuryStatus", "ACTIVE")).replace("_", " ")
-            players.append(__import__('app.domain',fromlist=['Player']).Player(id=str(source.get("id")),name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,mean),stdev=max(.1,mean*.32),availability=.7 if injury in {"QUESTIONABLE","DOUBTFUL"} else 0 if injury in {"OUT","INJURY RESERVE"} else 1,injury_status=injury,rostered=True,projection_available=weekly_projection is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"]))
+            injury, availability = _injury_values(source)
+            players.append(__import__('app.domain',fromlist=['Player']).Player(id=str(source.get("id")),name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=mean,stdev=max(.1,mean*.38 if "season projection" in projection_source else mean*.32),availability=availability,injury_status=injury,rostered=True,projection_available=projection_available,projection_source=projection_source,season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"]))
         overall = t.get("record", {}).get("overall", {})
         wins = float(overall.get("wins", 0) or 0)
         losses = float(overall.get("losses", 0) or 0)
@@ -181,7 +222,10 @@ async def connect_espn(
                     pool_diagnostics["rejected"]["missing_player_object"] = pool_diagnostics["rejected"].get("missing_player_object", 0) + 1
                     continue
                 pid=str(source.get("id") or "")
-                position=position_map.get(source.get("defaultPositionId"))
+                try:
+                    position=position_map.get(int(source.get("defaultPositionId")))
+                except (TypeError, ValueError):
+                    position=None
                 if not pid:
                     pool_diagnostics["rejected"]["missing_player_id"] = pool_diagnostics["rejected"].get("missing_player_id", 0) + 1
                     continue
@@ -189,11 +233,12 @@ async def connect_espn(
                     pool_diagnostics["rejected"]["unsupported_position"] = pool_diagnostics["rejected"].get("unsupported_position", 0) + 1
                     continue
                 values = _espn_player_values(source, int(raw.get("scoringPeriodId", 1)), item)
-                projected = values["weekly_projection"]
+                projected, projection_available, projection_source = _usable_projection(values)
                 eligible={position}
                 if position in {"RB","WR","TE"}: eligible.add("FLEX")
                 if position in {"QB","RB","WR","TE"}: eligible.add("SUPERFLEX")
-                draft_player=__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=max(0,float(projected or 0)),stdev=max(.1,float(projected or 0)*.38),availability=1,injury_status=str(source.get("injuryStatus","ACTIVE")),rostered=pid in rostered,projection_available=projected is not None,projection_source="ESPN fantasy projection",season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"],draft_pool_rank=pool_rank)
+                injury, availability = _injury_values(source)
+                draft_player=__import__('app.domain',fromlist=['Player']).Player(id=pid,name=source.get("fullName","Unknown player"),position=position,team=pro_team_map.get(source.get("proTeamId"),"FA"),eligible_slots=eligible,mean=projected,stdev=max(.1,projected*.38),availability=availability,injury_status=injury,rostered=pid in rostered,projection_available=projection_available,projection_source=projection_source,season_projection=values["season_projection"],average_draft_position=values["average_draft_position"],percent_owned=values["percent_owned"],espn_rank=values["espn_rank"],draft_pool_rank=pool_rank)
                 draft_pool.append(draft_player)
                 if pid not in rostered:
                     free_agents.append(draft_player.model_copy(update={"rostered": False}))

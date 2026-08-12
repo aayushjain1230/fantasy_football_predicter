@@ -180,6 +180,12 @@ def ensure_state() -> None:
         st.session_state.decision_journal = []
     if "my_team_view" not in st.session_state:
         st.session_state.my_team_view = "Set My Lineup"
+    # Streamlit preserves widget state across deployments. Remove retired values
+    # so an old Draft/Team radio choice cannot hide the current recommendation UI.
+    if st.session_state.get("draft_workspace") not in {"My Draft Plan", "Live Draft"}:
+        st.session_state.draft_workspace = "My Draft Plan"
+    if st.session_state.get("my_team_view") not in {"Set My Lineup", "Waiver Adds", "Trades"}:
+        st.session_state.my_team_view = "Set My Lineup"
 
 
 def client_fingerprint() -> str:
@@ -912,7 +918,7 @@ def page_draft_intelligence(league) -> None:
     if draft_type == "auction":
         st.info("Auction drafts do not have round-owned picks. Live Draft will rank nominations after you start it.")
         return
-    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=min(30, int(st.session_state.draft_rounds)), strategy=st.session_state.draft_strategy, draft_type=draft_type)
+    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=min(30, int(st.session_state.draft_rounds)), strategy=st.session_state.draft_strategy, draft_type=draft_type, league_size=settings.league_size)
     if not board:
         pool = league.draft_pool or league.free_agents
         if not pool:

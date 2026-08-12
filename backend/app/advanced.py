@@ -87,15 +87,23 @@ def evaluate_trade(league: League, send_ids: list[str], receive_ids: list[str], 
 def trade_ideas(league: League) -> list[TradeResult]:
     team = user_team(league)
     ideas = []
+    candidates: list[tuple[float, str, Player, Player]] = []
     for opponent in [t for t in league.teams if t.id != team.id]:
         sends = sorted((p for p in team.players if p.projection_available), key=lambda p: p.mean)[-5:]
         receives = sorted((p for p in opponent.players if p.projection_available), key=lambda p: p.mean, reverse=True)[:5]
         for send, receive in itertools.product(sends, receives):
             if send.position != receive.position and "FLEX" not in send.eligible_slots.intersection(receive.eligible_slots):
                 continue
-            result = evaluate_trade(league, [send.id], [receive.id], opponent.id)
-            if result.weekly_delta >= -1:
-                ideas.append(result)
+            difference = receive.mean - send.mean
+            # Prefer plausible value bands before running the expensive full
+            # legal-roster comparison. The final verdict still uses that exact
+            # comparison; this only bounds work for large real leagues.
+            preliminary = difference - abs(difference) * 0.35
+            candidates.append((preliminary, opponent.id, send, receive))
+    for _, opponent_id, send, receive in sorted(candidates, key=lambda row: row[0], reverse=True)[:48]:
+        result = evaluate_trade(league, [send.id], [receive.id], opponent_id)
+        if result.weekly_delta >= -1:
+            ideas.append(result)
     return sorted(ideas, key=lambda x: (x.weekly_delta, x.acceptance_likelihood), reverse=True)[:5]
 
 

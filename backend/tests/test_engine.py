@@ -1,4 +1,4 @@
-from app.advanced import calibration_summary, evaluate_trade, player_research, power_rankings
+from app.advanced import calibration_summary, evaluate_trade, player_research, power_rankings, trade_ideas
 from app.demo import demo_league
 from app.domain import League, Player, Team
 from app.engine import optimize_lineup, project, waiver_moves
@@ -87,6 +87,24 @@ def test_waiver_moves_compare_legal_lineups_and_use_week_specific_ros():
     assert "espn weekly projections" in " ".join(moves[0].reasons).lower()
     assert moves[0].drop_safety in {"Safe drop", "Reasonable drop", "Situational drop", "High-risk drop", "Do not drop"}
     assert moves[0].faab_guidance["label"] == "Value-based FAAB guidance"
+
+
+def test_recommendations_survive_missing_current_week_with_real_season_baselines():
+    league = demo_league()
+    league.teams = [
+        team.model_copy(update={"players": [player.model_copy(update={"mean": float(player.season_projection or player.mean * 17) / 17, "projection_available": True, "projection_source": "ESPN season projection (weekly average)", "season_projection": float(player.season_projection or player.mean * 17)}) for player in team.players]})
+        for team in league.teams
+    ]
+    league.free_agents = [player.model_copy(update={"mean": float(player.season_projection or player.mean * 17) / 17, "projection_available": True, "projection_source": "ESPN season projection (weekly average)", "season_projection": float(player.season_projection or player.mean * 17)}) for player in league.free_agents]
+    lineup = optimize_lineup(league.teams[0].players, league.roster_slots, league=league)
+    moves = waiver_moves(league)
+    ideas = trade_ideas(league)
+    assert lineup.starters
+    assert lineup.expected_score > 0
+    assert moves
+    assert ideas
+    assert "season-average" in " ".join(moves[0].reasons).lower()
+    assert moves[0].confidence < 0.64
 
 
 def test_uneven_trade_reports_required_drop_and_heuristic_risk():
