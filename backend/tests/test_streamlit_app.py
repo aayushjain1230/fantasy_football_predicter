@@ -94,6 +94,50 @@ def test_espn_synced_picks_use_confirmed_configuration_not_provider_owner():
     assert [pick["round"] for pick in picks] == [1, 2]
 
 
+def test_every_connected_primary_page_is_simple_and_renders_without_error():
+    from app.demo import demo_league
+
+    app_path = Path(__file__).resolve().parents[2] / "streamlit_app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=60).run()
+    league = demo_league()
+    league.draft_pool = [
+        player.model_copy(update={"average_draft_position": float(index * 8), "season_projection": player.mean * 14})
+        for index, player in enumerate(league.free_agents, 1)
+    ]
+    app.session_state["league"] = league
+    app.session_state["league_connected"] = True
+    app.session_state["mode"] = "live"
+    app = app.run()
+    for page in ["Home", "My Team", "Players", "Draft", "Settings"]:
+        navigation = next(radio for radio in app.radio if "Home" in radio.options)
+        navigation.set_value(page)
+        app = app.run()
+        assert not app.exception, page
+        visible_labels = [tab.label for tab in app.tabs] + [value for radio in app.radio for value in radio.options]
+        assert not any("Lab" in label for label in visible_labels)
+    navigation = next(radio for radio in app.radio if "Home" in radio.options)
+    navigation.set_value("My Team")
+    app = app.run()
+    decision_nav = next(radio for radio in app.radio if "Set My Lineup" in radio.options)
+    assert decision_nav.options == ["Set My Lineup", "Waiver Adds", "Trades"]
+
+
+def test_connected_league_page_renders_concise_outlook():
+    from app.demo import demo_league
+
+    app_path = Path(__file__).resolve().parents[2] / "streamlit_app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=90).run()
+    app.session_state["league"] = demo_league()
+    app.session_state["league_connected"] = True
+    app.session_state["mode"] = "live"
+    app = app.run()
+    navigation = next(radio for radio in app.radio if "Home" in radio.options)
+    navigation.set_value("League")
+    app = app.run()
+    assert not app.exception
+    assert any("League Standings" in item.value for item in app.markdown)
+
+
 def test_no_synthetic_sine_trend_left_in_backend():
     root = Path(__file__).resolve().parents[1] / "app"
     text = "\n".join(path.read_text(encoding="utf-8") for path in root.glob("*.py"))
