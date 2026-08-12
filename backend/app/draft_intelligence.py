@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import math
+import random
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +53,16 @@ class DraftConfiguration(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     unsupported_settings: list[str] = Field(default_factory=list)
     sources: dict[str, str] = Field(default_factory=dict)
+    manager_count_confirmed: bool = False
+    draft_slot_confirmed: bool = False
+
+
+class DraftSetupResolution(BaseModel):
+    value: int | None = None
+    source: Literal["espn_settings", "espn_teams", "espn_draft_order", "espn_live_draft", "manual", "unavailable"] = "unavailable"
+    confirmed: bool = False
+    conflict_values: list[int] = Field(default_factory=list)
+    message: str = ""
 
 
 class DraftSelection(BaseModel):
@@ -93,6 +104,22 @@ class DraftState(BaseModel):
             return self
         return self.model_copy(update={"selections": self.selections[:-1], "current_overall_pick": self.selections[-1].overall_pick})
 
+    def correct(self, overall_pick: int, selection: DraftSelection) -> "DraftState":
+        if overall_pick < 1 or overall_pick >= self.current_overall_pick:
+            raise ValueError("PICK_NOT_RECORDED")
+        existing = next((item for item in self.selections if item.overall_pick == overall_pick), None)
+        if existing is None:
+            raise ValueError("PICK_NOT_RECORDED")
+        if any(item.player_id == selection.player_id and item.overall_pick != overall_pick for item in self.selections):
+            raise ValueError("PLAYER_ALREADY_DRAFTED")
+        corrected = [selection if item.overall_pick == overall_pick else item for item in self.selections]
+        return self.model_copy(update={"selections": corrected})
+
+    def reset(self, *, confirmed: bool = False) -> "DraftState":
+        if not confirmed:
+            raise ValueError("RESET_CONFIRMATION_REQUIRED")
+        return self.model_copy(update={"selections": [], "current_overall_pick": 1})
+
 
 SLOT_ELIGIBILITY = {
     "QB": {"QB"}, "RB": {"RB"}, "WR": {"WR"}, "TE": {"TE"},
@@ -120,6 +147,14 @@ def picks_for_slot(draft_slot: int, league_size: int, rounds: int, draft_type: s
     if draft_type == "auction":
         return []
     return [pick_for_slot(round_number, draft_slot, league_size, draft_type) for round_number in range(1, rounds + 1)]
+
+
+def live_draft_started(completed_picks: list[dict[str, Any]], manual_started: bool = False) -> bool:
+    return bool(completed_picks or manual_started)
+
+
+def ignored_for_current_pick(ignored_player_ids: set[str], previous_pick: int, current_pick: int) -> set[str]:
+    return set(ignored_player_ids) if previous_pick == current_pick else set()
 
 
 def next_owned_pick(current_overall_pick: int, draft_slot: int, league_size: int, draft_type: str) -> int | None:
@@ -175,13 +210,54 @@ def league_draft_type(league: League) -> str:
 
 
 def league_team_count(league: League) -> int:
-    """Prefer ESPN's configured league size; the team list can be partial pre-draft."""
+    """Compatibility helper. New UI must use resolve_manager_count and confirmation."""
     configured = league.raw_settings.get("size") if isinstance(league.raw_settings, dict) else None
     try:
         size = int(configured)
     except (TypeError, ValueError):
         size = len(league.teams)
     return max(2, size or len(league.teams) or 12)
+
+
+def resolve_manager_count(league: League, manual_value: int | None = None, *, manual_confirmed: bool = False) -> DraftSetupResolution:
+    settings = league.raw_settings if isinstance(league.raw_settings, dict) else {}
+    configured = settings.get("size")
+    try:
+        espn_size = int(configured)
+        if not 4 <= espn_size <= 20:
+            espn_size = None
+    except (TypeError, ValueError):
+        espn_size = None
+    team_count = len({team.id for team in league.teams if team.id})
+    team_count = team_count if 4 <= team_count <= 20 else None
+    if manual_confirmed and manual_value is not None:
+        value = min(20, max(4, int(manual_value)))
+        return DraftSetupResolution(value=value, source="manual", confirmed=True, message="Confirmed by you.")
+    if espn_size and team_count and espn_size != team_count:
+        return DraftSetupResolution(value=None, source="unavailable", confirmed=False, conflict_values=sorted({team_count, espn_size}), message=f"ESPN reports {espn_size} managers, but {team_count} teams were returned.")
+    if espn_size:
+        return DraftSetupResolution(value=espn_size, source="espn_settings", confirmed=False, message=f"ESPN settings report {espn_size} managers. Please confirm.")
+    if team_count:
+        return DraftSetupResolution(value=team_count, source="espn_teams", confirmed=False, message=f"ESPN returned {team_count} unique teams. Please confirm the league is fully populated.")
+    return DraftSetupResolution(message="ESPN did not provide a reliable manager count. Enter it manually.")
+
+
+def resolve_draft_slot(league: League, manual_value: int | None = None, *, manual_confirmed: bool = False) -> DraftSetupResolution:
+    settings = league.raw_settings if isinstance(league.raw_settings, dict) else {}
+    order = settings.get("_draft_order") or {}
+    live_order = settings.get("_live_draft_order") or {}
+    for source_name, values in (("espn_draft_order", order), ("espn_live_draft", live_order)):
+        if isinstance(values, dict):
+            raw_slot = values.get(str(league.user_team_id)) or values.get(league.user_team_id)
+            try:
+                slot = int(raw_slot)
+            except (TypeError, ValueError):
+                slot = 0
+            if slot > 0:
+                return DraftSetupResolution(value=slot, source=source_name, confirmed=False, message="ESPN published this team’s draft-order assignment. Please confirm.")
+    if manual_confirmed and manual_value is not None:
+        return DraftSetupResolution(value=max(1, int(manual_value)), source="manual", confirmed=True, message="Confirmed by you.")
+    return DraftSetupResolution(value=manual_value, source="unavailable", confirmed=False, message="ESPN has not published your draft order yet.")
 
 
 def build_draft_configuration(
@@ -192,36 +268,45 @@ def build_draft_configuration(
     current_overall_pick: int = 1,
     total_rounds: int | None = None,
     keeper_player_ids: set[str] | None = None,
+    manager_count_confirmed: bool = False,
+    draft_slot_confirmed: bool = False,
+    draft_type: str | None = None,
+    scoring_format: str | None = None,
+    starting_slots: list[str] | None = None,
+    bench_slots: int | None = None,
 ) -> DraftConfiguration:
     settings = league.raw_settings if isinstance(league.raw_settings, dict) else {}
     counts = (settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
-    bench = int(counts.get("20", counts.get(20, 0)) or 0)
+    bench = int(counts.get("20", counts.get(20, 0)) or 0) if bench_slots is None else int(bench_slots)
     ir = int(counts.get("21", counts.get(21, 0)) or 0)
     size = min(20, max(4, int(league_size or league_team_count(league))))
-    draft_type = league_draft_type(league)
+    resolved_draft_type = draft_type or league_draft_type(league)
     scoring_items = (settings.get("scoringSettings") or {}).get("scoringItems") or []
     reception_points = next((float(item.get("points", 0) or 0) for item in scoring_items if int(item.get("statId", -1)) == 53), 0)
-    scoring_format = "full PPR" if reception_points >= 0.75 else "half PPR" if reception_points > 0 else "standard"
+    resolved_scoring_format = scoring_format or ("full PPR" if reception_points >= 0.75 else "half PPR" if reception_points > 0 else "standard")
     assumptions = []
     if not counts:
         assumptions.append("ESPN did not expose bench/IR counts; editable defaults are shown.")
-    rounds = total_rounds or max(1, len(league.roster_slots) + bench)
-    owned = picks_for_slot(draft_slot, size, rounds, draft_type) if draft_slot and draft_type != "auction" else []
+    resolved_slots = list(starting_slots if starting_slots is not None else league.roster_slots)
+    rounds = total_rounds or max(1, len(resolved_slots) + bench)
+    owned = picks_for_slot(draft_slot, size, rounds, resolved_draft_type) if draft_slot and resolved_draft_type != "auction" else []
     return DraftConfiguration(
         league_size=size,
-        draft_type=draft_type,
+        draft_type=resolved_draft_type,
         draft_slot=draft_slot,
         current_overall_pick=current_overall_pick,
         total_rounds=rounds,
-        scoring_format=scoring_format,
+        scoring_format=resolved_scoring_format,
         scoring_rules=league.scoring,
-        starting_slots=list(league.roster_slots),
+        starting_slots=resolved_slots,
         bench_slots=bench,
         ir_slots=ir,
         keeper_player_ids=set(keeper_player_ids or set()),
         user_owned_picks=owned,
         assumptions=assumptions,
         sources={"league_size": "ESPN settings.size", "draft_type": "ESPN draftSettings", "roster": "ESPN lineupSlotCounts", "scoring": "ESPN scoringItems"},
+        manager_count_confirmed=manager_count_confirmed,
+        draft_slot_confirmed=draft_slot_confirmed,
     )
 
 
@@ -570,6 +655,49 @@ class DraftIntelligenceService:
     def __init__(self, artifact_dir: Path | None = None):
         self.artifact_dir = artifact_dir or Path(__file__).resolve().parents[2] / "models" / "draft" / "latest"
         self._artifact: dict[str, Any] | None | bool = False
+        self._mock_cache: dict[str, dict[str, float]] = {}
+
+    def _mock_completed_roster_scores(
+        self,
+        candidates: list[dict[str, Any]],
+        settings: DraftSettings,
+        user_positions: list[str],
+        starting_slots: list[str],
+    ) -> dict[str, float]:
+        """Fast deterministic mock evidence; opponents vary around ADP and positional runs."""
+        key = hashlib.sha256(json.dumps({"players": [(row["player_id"], row["consensus_adp"], row.get("expected_vor")) for row in candidates], "settings": settings.__dict__, "positions": user_positions, "slots": starting_slots}, sort_keys=True, default=str).encode()).hexdigest()
+        if key in self._mock_cache:
+            return self._mock_cache[key]
+        scores: dict[str, float] = {}
+        for candidate in candidates[:12]:
+            outcomes = []
+            for simulation in range(24):
+                rng = random.Random(f"{key}:{candidate['player_id']}:{simulation}")
+                remaining = [row for row in candidates if row["player_id"] != candidate["player_id"]]
+                roster = [*user_positions, candidate["position"]]
+                value = float(candidate.get("expected_vor") or max(0, 80 - candidate["consensus_adp"]))
+                selection = settings.current_pick + 1
+                for _round in range(5):
+                    opponent_picks = max(0, min(settings.league_size * 2, settings.next_pick - selection))
+                    for _ in range(opponent_picks):
+                        if not remaining:
+                            break
+                        visible = sorted(remaining, key=lambda row: abs(row["consensus_adp"] - selection) + rng.uniform(0, settings.league_size * 0.9))[:8]
+                        chosen = rng.choice(visible)
+                        remaining.remove(chosen)
+                        selection += 1
+                    if not remaining:
+                        break
+                    choice = max(remaining[:40], key=lambda row: (float(row.get("expected_vor") or 0) / 25) + 2.5 * marginal_roster_fit(roster, row["position"], starting_slots) + rng.uniform(-0.35, 0.35))
+                    remaining.remove(choice)
+                    roster.append(choice["position"])
+                    value += float(choice.get("expected_vor") or max(0, 80 - choice["consensus_adp"]))
+                    selection = settings.next_pick + 1
+                assignment = best_roster_assignment(roster, starting_slots)
+                outcomes.append(value + assignment["filled"] * 8 - len(assignment["gaps"]) * 10)
+            scores[candidate["player_id"]] = round(mean(outcomes), 2)
+        self._mock_cache[key] = scores
+        return scores
 
     def load_artifact(self) -> dict[str, Any] | None:
         if self._artifact is not False:
@@ -639,6 +767,11 @@ class DraftIntelligenceService:
                     "injury_status": player.injury_status,
                     "season_projection": round(season_value, 2) if season_value is not None else None,
                     "expected_vor": round(vor, 2) if vor is not None else None,
+                    "points_per_game": round(season_value / 17, 2) if season_value is not None else None,
+                    "floor": round(max(0, season_value * 0.78), 2) if season_value is not None else None,
+                    "median": round(season_value, 2) if season_value is not None else None,
+                    "ceiling": round(season_value * 1.22, 2) if season_value is not None else None,
+                    "risk": "High" if str(player.injury_status).upper() not in {"ACTIVE", "HEALTHY"} else "Medium" if season_value is None else "Low",
                 }
             )
         projected = [row for row in base_rows if row["expected_vor"] is not None]
@@ -655,6 +788,7 @@ class DraftIntelligenceService:
         value_rank = {row["player_id"]: rank for rank, row in enumerate(by_value, 1)}
         for row in base_rows:
             row["value_rank"] = value_rank[row["player_id"]]
+            row["fourth_down_rank"] = value_rank[row["player_id"]]
             row["adp_relative_value"] = round(row["consensus_adp"] - row["value_rank"], 2)
             if row["season_projection"] is not None and row["adp_available"]:
                 row["confidence"] = "ESPN live ADP + season projection"
@@ -690,7 +824,7 @@ class DraftIntelligenceService:
             available = 1 - (0.5 * (1 + math.erf(z / math.sqrt(2))))
             available = max(0.05, min(0.95, round(available / 0.05) * 0.05))
             row["availability_probability"] = available
-            row["availability_label"] = "HIGH" if available >= 0.7 else "MEDIUM" if available >= 0.35 else "LOW"
+            row["availability_label"] = "Likely available later" if available >= 0.7 else "Could return" if available >= 0.35 else "Unlikely to return"
             row["availability_method"] = "Heuristic ADP/rank availability probability; not historically calibrated"
             row["cost_of_waiting"] = round((1 - available) * float(row.get("tier_drop_after_player") or 0), 2)
         return sorted(base_rows, key=lambda row: (row["value_rank"], row["consensus_adp"]))
@@ -739,11 +873,26 @@ class DraftIntelligenceService:
                 score = projection_component * 0.8 + need_bonus * 0.65 + urgency * 1.15 + value_score * 1.5 + run_bonus * 1.2 + waiting_cost_component * 1.2 - wait_penalty * 0.35 - injury_penalty * 0.45 - missing_projection_penalty * 0.25
             else:
                 score = projection_component + need_bonus + urgency + value_score + run_bonus + waiting_cost_component - wait_penalty * 0.75 - injury_penalty - missing_projection_penalty * 0.5
-            reason = (
-                f"{strategy.title()} strategy; ESPN ADP/rank {row['consensus_adp']}; value rank {row['value_rank']}; "
-                f"fills open starter {bool(fills_open_starter)}; recent {position} picks {recent.count(position)}; round {round_number}; next scheduled pick {settings.next_pick}."
-            )
+            reason_parts = []
+            if fills_open_starter:
+                reason_parts.append(f"fills an open {position} or flex starter")
+            if row.get("players_remaining_in_tier", 0) <= 2:
+                reason_parts.append(f"only {row.get('players_remaining_in_tier', 0)} remain in Tier {row.get('tier')}")
+            if row["availability_label"] == "Unlikely to return":
+                reason_parts.append(f"unlikely to return at pick {settings.next_pick}")
+            elif row.get("adp_relative_value", 0) > 3:
+                reason_parts.append("costs less than Fourth Down’s value rank")
+            if not reason_parts:
+                reason_parts.append("strongest roster-adjusted value among realistic options")
+            reason = "; ".join(reason_parts[:3]).capitalize() + "."
             scored.append({**row, "pick_score": round(score, 2), "strategy": strategy, "recommendation_reason": reason})
+        mock_scores = self._mock_completed_roster_scores(scored, settings, user_drafted_positions, league.roster_slots)
+        if mock_scores:
+            ordered_mock = sorted(mock_scores, key=mock_scores.get, reverse=True)
+            mock_rank = {player_id: rank for rank, player_id in enumerate(ordered_mock, 1)}
+            for row in scored:
+                row["completed_roster_quality"] = mock_scores.get(row["player_id"])
+                row["pick_score"] = round(row["pick_score"] + max(0, 13 - mock_rank.get(row["player_id"], 13)) * 0.08, 2)
         return sorted(scored, key=lambda row: (row["pick_score"], row["expected_vor"] or 0), reverse=True)[: backup_count + 1]
 
     def draft_insights(
@@ -807,6 +956,7 @@ class DraftIntelligenceService:
         rounds: int = 8,
         keeper_positions: list[str] | None = None,
         strategy: str = "balanced",
+        draft_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Create a pre-draft slot plan; availability is an ADP window, not a promise."""
         league_size = league_team_count(league)
@@ -814,11 +964,11 @@ class DraftIntelligenceService:
         chosen_ids: set[str] = set()
         positions = list(keeper_positions or [])
         recommendations: list[dict[str, Any]] = []
-        previous_pick = 0
+        draft_type = draft_type or league_draft_type(league)
         for round_number in range(1, rounds + 1):
-            pick_number = snake_next_pick(previous_pick, draft_slot, league_size)
-            next_pick = snake_next_pick(pick_number, draft_slot, league_size)
-            board = self.current_board(league, DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick), chosen_ids)
+            pick_number = pick_for_slot(round_number, draft_slot, league_size, draft_type)
+            next_pick = pick_for_slot(round_number + 1, draft_slot, league_size, draft_type)
+            board = self.current_board(league, DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick, draft_type=draft_type), chosen_ids)
             likely_gone = {
                 row["player_id"]
                 for row in board
@@ -826,19 +976,26 @@ class DraftIntelligenceService:
             }
             plan = self.pick_plan(
                 league,
-                DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick),
+                DraftSettings(league_size=league_size, current_pick=pick_number, next_pick=next_pick, draft_type=draft_type),
                 chosen_ids | likely_gone,
                 positions,
-                backup_count=3,
+                backup_count=7,
                 strategy=strategy,
             )
             if not plan:
                 break
             choice = plan[0]
-            recommendations.append({**choice, "round": round_number, "overall_pick": pick_number, "backups": [row["player_name"] for row in plan[1:4]]})
+            primary = plan[:3]
+            backups = plan[3:6]
+            skill_positions = {row["position"] for row in primary}
+            instruction = f"Prioritize the strongest remaining {' or '.join(sorted(skill_positions))} tier. Do not force a position if that tier is gone."
+            recommendations.append({
+                **choice, "round": round_number, "overall_pick": pick_number,
+                "primary_targets": primary, "backup_targets": backups,
+                "backups": [row["player_name"] for row in backups], "instruction": instruction,
+            })
             chosen_ids.add(choice["player_id"])
             positions.append(choice["position"])
-            previous_pick = pick_number
         return recommendations
 
     def turn_pair_plan(

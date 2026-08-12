@@ -18,6 +18,8 @@ from app.draft_intelligence import (
     fit_outcome_thresholds,
     league_draft_type,
     league_team_count,
+    live_draft_started,
+    ignored_for_current_pick,
     load_csv,
     marginal_roster_fit,
     next_owned_pick,
@@ -26,6 +28,8 @@ from app.draft_intelligence import (
     picks_for_slot,
     snake_next_pick,
     train_draft_artifact,
+    resolve_manager_count,
+    resolve_draft_slot,
 )
 
 
@@ -169,7 +173,7 @@ def test_pick_plan_uses_live_values_and_returns_ranked_backups(tmp_path):
     assert len(plan) == min(4, len([p for p in league.free_agents if p.position in {"QB", "RB", "WR", "TE"}]))
     assert all(not row["fallback_used"] for row in plan)
     assert plan == sorted(plan, key=lambda row: (row["pick_score"], row["expected_vor"]), reverse=True)
-    assert all("ESPN ADP" in row["recommendation_reason"] for row in plan)
+    assert all(len(row["recommendation_reason"].split(";")) <= 3 for row in plan)
 
 
 def test_draft_strategy_changes_scoring_and_is_explained(tmp_path):
@@ -280,6 +284,61 @@ def test_snake_examples_and_turns_are_exact():
     assert next_owned_pick(14, 12, 12, "snake") == 36
 
 
+def test_required_ten_team_snake_examples_are_exact():
+    assert picks_for_slot(1, 10, 5, "snake") == [1, 20, 21, 40, 41]
+    assert picks_for_slot(3, 10, 5, "snake") == [3, 18, 23, 38, 43]
+    assert picks_for_slot(6, 10, 5, "snake") == [6, 15, 26, 35, 46]
+    assert picks_for_slot(10, 10, 5, "snake") == [10, 11, 30, 31, 50]
+
+
+def test_manager_count_conflict_requires_manual_confirmation():
+    league = demo_league()
+    league.raw_settings = {"size": 10}
+    conflict = resolve_manager_count(league)
+    assert conflict.value is None
+    assert conflict.conflict_values == [4, 10]
+    confirmed = resolve_manager_count(league, 10, manual_confirmed=True)
+    assert confirmed.value == 10 and confirmed.confirmed and confirmed.source == "manual"
+
+
+def test_manager_count_uses_matching_espn_settings():
+    league = demo_league()
+    league.raw_settings = {"size": len(league.teams)}
+    result = resolve_manager_count(league)
+    assert result.value == len(league.teams)
+    assert result.source == "espn_settings"
+    assert not result.confirmed
+
+
+def test_draft_seat_requires_published_order_or_manual_confirmation():
+    league = demo_league()
+    league.user_team_id = "3"
+    league.raw_settings = {"size": 10}
+    unavailable = resolve_draft_slot(league)
+    assert unavailable.value is None
+    assert unavailable.source == "unavailable"
+    manual = resolve_draft_slot(league, 6, manual_confirmed=True)
+    assert manual.value == 6 and manual.source == "manual"
+    league.raw_settings["_draft_order"] = {"3": 8}
+    published = resolve_draft_slot(league)
+    assert published.value == 8 and published.source == "espn_draft_order"
+
+
+def test_team_id_is_never_treated_as_draft_seat():
+    league = demo_league()
+    league.user_team_id = "2"
+    league.raw_settings = {"size": 10}
+    assert resolve_draft_slot(league).value is None
+
+
+def test_live_start_and_ignore_for_pick_are_explicit():
+    assert not live_draft_started([], False)
+    assert live_draft_started([], True)
+    assert live_draft_started([{"player_id": "p1"}], False)
+    assert ignored_for_current_pick({"p1"}, 8, 8) == {"p1"}
+    assert ignored_for_current_pick({"p1"}, 8, 9) == set()
+
+
 def test_auction_has_no_owned_pick_order():
     assert picks_for_slot(1, 12, 20, "auction") == []
     assert next_owned_pick(1, 1, 12, "auction") is None
@@ -334,7 +393,7 @@ def test_value_cliff_tiers_and_waiting_fields_exist(tmp_path):
     board = DraftIntelligenceService(tmp_path).current_board(league, DraftSettings(current_pick=1, next_pick=20), set())
     assert board
     assert all("tier_drop_after_player" in row for row in board)
-    assert all(row["availability_label"] in {"LOW", "MEDIUM", "HIGH"} for row in board)
+    assert all(row["availability_label"] in {"Unlikely to return", "Could return", "Likely available later"} for row in board)
     assert all(0.05 <= row["availability_probability"] <= 0.95 for row in board)
     assert all(row["cost_of_waiting"] >= 0 for row in board)
 

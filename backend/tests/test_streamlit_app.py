@@ -48,6 +48,52 @@ def test_streamlit_starts_disconnected_without_displaying_demo_league():
     assert any(button.label == "Connect ESPN League" for button in app.button)
 
 
+def test_connected_draft_setup_plan_and_manual_live_flow():
+    from app.demo import demo_league
+
+    app_path = Path(__file__).resolve().parents[2] / "streamlit_app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    league = demo_league()
+    league.draft_pool = [
+        player.model_copy(update={"average_draft_position": float(index * 8), "season_projection": player.mean * 14})
+        for index, player in enumerate(league.free_agents, 1)
+    ]
+    app.session_state["league"] = league
+    app.session_state["league_connected"] = True
+    app.session_state["mode"] = "live"
+    app = app.run()
+    app.radio[0].set_value("Draft")
+    app = app.run()
+    assert any(button.label == "Confirm Draft Setup" for button in app.button)
+    next(button for button in app.button if button.label == "Confirm Draft Setup").click()
+    app = app.run()
+    workspace = next(radio for radio in app.radio if "Live Draft" in radio.options)
+    assert workspace.options == ["My Draft Plan", "Live Draft"]
+    workspace.set_value("Live Draft")
+    app = app.run()
+    assert any(button.label == "Start Manual Live Draft" for button in app.button)
+    next(button for button in app.button if button.label == "Start Manual Live Draft").click()
+    app = app.run()
+    assert not app.exception
+    assert any("YOU’RE ON THE CLOCK" in item.value for item in app.success)
+    assert any(button.label == "Drafted" for button in app.button)
+    assert any(button.label == "Ignore for this pick" for button in app.button)
+
+
+def test_espn_synced_picks_use_confirmed_configuration_not_provider_owner():
+    import streamlit_app
+    from app.demo import demo_league
+    from app.draft_intelligence import build_draft_configuration
+
+    config = build_draft_configuration(demo_league(), league_size=10, draft_slot=6, total_rounds=20, manager_count_confirmed=True, draft_slot_confirmed=True)
+    picks = streamlit_app.synced_picks_for_configuration(
+        [{"number": 10, "owner_slot": 99, "player_id": "a"}, {"number": 11, "owner_slot": 99, "player_id": "b"}],
+        config,
+    )
+    assert [pick["owner_slot"] for pick in picks] == [10, 10]
+    assert [pick["round"] for pick in picks] == [1, 2]
+
+
 def test_no_synthetic_sine_trend_left_in_backend():
     root = Path(__file__).resolve().parents[1] / "app"
     text = "\n".join(path.read_text(encoding="utf-8") for path in root.glob("*.py"))

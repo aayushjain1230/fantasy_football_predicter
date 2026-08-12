@@ -1,5 +1,7 @@
 # Fourth Down
 
+The Draft workspace now follows one confirmed flow: **Draft Setup → My Draft Plan → Live Draft**. Manager count and draft seat must be confirmed; team ID is never treated as draft position. See [Draft experience and methodology](docs/DRAFT_EXPERIENCE.md) for configuration provenance, recommendation behavior, ESPN synchronization, security, and limitations.
+
 Fourth Down is a free, explainable fantasy football decision engine for ESPN leagues, focused on honest lineup, waiver, trade, draft, and league-strength decisions.
 
 Screenshot: after deployment, add a real screenshot of the Streamlit Home or Dashboard page here. Do not use a mockup as evidence of live functionality.

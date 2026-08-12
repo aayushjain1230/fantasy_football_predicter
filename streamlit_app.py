@@ -9,6 +9,7 @@ import os
 import re
 import sys
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -49,6 +50,7 @@ from app.advanced import (  # noqa: E402
     what_if,
 )
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
+from app.domain import League, Player, Team  # noqa: E402
 from app import draft_intelligence as _draft_intelligence  # noqa: E402
 
 # Streamlit Cloud may hot-reload this entry point while retaining the previous
@@ -64,6 +66,8 @@ DraftState = _draft_intelligence.DraftState
 build_draft_configuration = _draft_intelligence.build_draft_configuration
 league_draft_type = _draft_intelligence.league_draft_type
 league_team_count = _draft_intelligence.league_team_count
+resolve_manager_count = _draft_intelligence.resolve_manager_count
+resolve_draft_slot = _draft_intelligence.resolve_draft_slot
 owner_of_pick = _draft_intelligence.owner_of_pick
 snake_next_pick = _draft_intelligence.snake_next_pick
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
@@ -129,11 +133,27 @@ def ensure_state() -> None:
     if "draft_picks" not in st.session_state:
         st.session_state.draft_picks = []
     if "draft_slot" not in st.session_state:
-        st.session_state.draft_slot = 6
+        st.session_state.draft_slot = None
     if "draft_strategy" not in st.session_state:
         st.session_state.draft_strategy = "balanced"
     if "draft_workspace" not in st.session_state:
-        st.session_state.draft_workspace = "Who Should I Draft?"
+        st.session_state.draft_workspace = "My Draft Plan"
+    if "draft_setup_confirmed" not in st.session_state:
+        st.session_state.draft_setup_confirmed = False
+    if "draft_manager_confirmed" not in st.session_state:
+        st.session_state.draft_manager_confirmed = False
+    if "draft_slot_confirmed" not in st.session_state:
+        st.session_state.draft_slot_confirmed = False
+    if "draft_manual_started" not in st.session_state:
+        st.session_state.draft_manual_started = False
+    if "draft_ignored" not in st.session_state:
+        st.session_state.draft_ignored = []
+    if "draft_paused" not in st.session_state:
+        st.session_state.draft_paused = False
+    if "draft_last_sync" not in st.session_state:
+        st.session_state.draft_last_sync = None
+    if "draft_configuration" not in st.session_state:
+        st.session_state.draft_configuration = None
     if "draft_league_size" not in st.session_state:
         st.session_state.draft_league_size = None
     if "draft_rounds" not in st.session_state:
@@ -209,13 +229,12 @@ def safe_draft_csv(rows: list[dict]) -> str:
 
 
 def canonical_draft_state(league) -> DraftState:
-    config = build_draft_configuration(
-        league,
-        league_size=league_team_count(league),
-        draft_slot=int(st.session_state.draft_slot),
-        current_overall_pick=int(st.session_state.current_pick),
-        total_rounds=int(st.session_state.draft_rounds),
+    config = st.session_state.get("draft_configuration") or build_draft_configuration(
+        league, league_size=league_team_count(league), draft_slot=int(st.session_state.draft_slot),
+        current_overall_pick=int(st.session_state.current_pick), total_rounds=int(st.session_state.draft_rounds),
+        manager_count_confirmed=True, draft_slot_confirmed=True,
     )
+    config = config.model_copy(update={"current_overall_pick": int(st.session_state.current_pick)})
     selections = []
     for index, pick in enumerate(sorted(st.session_state.draft_picks, key=lambda row: int(row.get("number", 0))), 1):
         number = int(pick.get("number") or index)
@@ -247,6 +266,17 @@ def draft_state_rows(state: DraftState) -> list[dict]:
         }
         for item in state.selections
     ]
+
+
+def synced_picks_for_configuration(picks: list[dict], config) -> list[dict]:
+    normalized = []
+    for pick in sorted(picks, key=lambda row: int(row.get("number", 0))):
+        number = int(pick.get("number") or 0)
+        if number < 1:
+            continue
+        owner_slot = owner_of_pick(number, config.league_size, config.draft_type) if config.draft_type != "auction" else 0
+        normalized.append({**pick, "number": number, "round": (number - 1) // config.league_size + 1, "pick_in_round": (number - 1) % config.league_size + 1, "owner_slot": owner_slot})
+    return normalized
 
 
 def render_draft_pool_diagnostics(league) -> None:
@@ -408,7 +438,7 @@ def page_home(league) -> None:
         [status_badge(league_label(league))],
     )
     if st.button("Who Should I Draft?", type="primary", use_container_width=True):
-        st.session_state.draft_workspace = "Who Should I Draft?"
+        st.session_state.draft_workspace = "Live Draft" if st.session_state.get("draft_setup_confirmed") else "My Draft Plan"
         st.session_state.pending_page = "Draft"
         st.rerun()
     brief = build_weekly_brief(league)
@@ -434,16 +464,16 @@ def page_home(league) -> None:
 
 
 def page_connect() -> None:
-    st.header("Connect League")
-    st.write("Enter a numeric ESPN league ID. Private leagues require both ESPN browser-cookie values.")
+    st.header("Connect ESPN League")
+    st.write("Connect with your league ID. Fourth Down never asks for your ESPN email or password.")
     with st.form("connect", clear_on_submit=False):
         league_id = st.text_input("League ID", value="")
         season = st.number_input("Season", min_value=2020, max_value=2030, value=2026, step=1)
-        team_id = st.text_input("Team ID (optional)", value="")
-        with st.expander("Private league authentication"):
+        team_id = st.text_input("Team (optional ESPN team ID)", value="")
+        with st.expander("Private league? Open secure connection instructions"):
             st.caption(
-                "Only enter credentials on a deployment you trust. Fourth Down sends them to ESPN for this request "
-                "and keeps them only in this isolated Streamlit session for explicit draft refreshes. They are never saved to the database, environment, logs, URL, or exports and are wiped on disconnect/reset."
+                "Stay signed in at ESPN in your own browser. In Developer Tools → Application/Storage → Cookies → espn.com, copy espn_s2 and SWID from the same session. "
+                "Do not enter your ESPN email or password. These cookie values stay only in this Streamlit session, are sent only to ESPN for your requests, and are wiped on disconnect/reset."
             )
             espn_s2 = st.text_input(
                 "espn_s2 cookie",
@@ -457,7 +487,9 @@ def page_connect() -> None:
                 type="password",
                 help="Copy the SWID value from the same ESPN browser session. Raw UUID, {UUID}, or SWID={UUID} formats are accepted.",
             )
-        submitted = st.form_submit_button("Connect league")
+        with st.expander("Fourth Down browser extension (future)"):
+            st.caption("Not available yet. This reserved interface will eventually accept a locally authorized league/draft handoff from an installed, tested extension. Fourth Down does not claim extension sync exists today.")
+        submitted = st.form_submit_button("Connect League")
     if submitted:
         league_id = league_id.strip()
         team_id = team_id.strip()
@@ -491,7 +523,15 @@ def page_connect() -> None:
             st.session_state.mode = "live"
             st.session_state.league_connected = True
             st.session_state.draft_picks = []
-            st.session_state.draft_league_size = league_team_count(league)
+            manager_resolution = resolve_manager_count(league)
+            seat_resolution = resolve_draft_slot(league)
+            st.session_state.draft_league_size = manager_resolution.value
+            st.session_state.draft_slot = seat_resolution.value
+            st.session_state.draft_manager_confirmed = False
+            st.session_state.draft_slot_confirmed = False
+            st.session_state.draft_setup_confirmed = False
+            st.session_state.draft_manual_started = False
+            st.session_state.draft_ignored = []
             roster_counts = (league.raw_settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
             st.session_state.draft_rounds = len(league.roster_slots) + int(roster_counts.get("20", roster_counts.get(20, 7)) or 7)
             st.session_state.playoff_scenarios = []
@@ -502,12 +542,56 @@ def page_connect() -> None:
                 st.warning("The league connected, but ESPN's draft-player pool is unavailable. Open Draft to see safe request and normalization counts.")
         except Exception as exc:
             st.error(connect_error(exc))
+    with st.expander("ESPN unavailable? Use manual draft setup"):
+        st.caption("Upload your own rankings CSV to plan without ESPN. Required columns: player, position. Optional: team, rank, adp, projection. Nothing is uploaded outside this Streamlit session.")
+        manual_team = st.text_input("Your team name", value="My Team", key="manual-team-name")
+        manual_size = st.number_input("Managers", 4, 20, 10, 1, key="manual-manager-count")
+        ranking_file = st.file_uploader("Ranking CSV", type=["csv"], key="manual-rankings")
+        if st.button("Continue with Manual Setup", disabled=ranking_file is None, use_container_width=True):
+            try:
+                text = ranking_file.getvalue().decode("utf-8-sig")
+                if len(text) > 2_000_000:
+                    raise ValueError("FILE_TOO_LARGE")
+                rows = list(csv.DictReader(io.StringIO(text)))
+                players = []
+                for index, row in enumerate(rows[:1500], 1):
+                    name = str(row.get("player") or row.get("name") or "").strip()[:80]
+                    position = str(row.get("position") or "").strip().upper()
+                    if not name or position not in {"QB", "RB", "WR", "TE", "K", "DST"}:
+                        continue
+                    adp_text = row.get("adp") or row.get("rank")
+                    projection_text = row.get("projection")
+                    adp = float(adp_text) if adp_text not in (None, "") else float(index)
+                    projection = float(projection_text) if projection_text not in (None, "") else None
+                    players.append(Player(id=f"upload-{index}", name=name, position=position, team=str(row.get("team") or "FA")[:5], mean=max(0, (projection or 0) / 17), stdev=max(.1, (projection or 0) * .02), rostered=False, projection_available=projection is not None, projection_source="User-uploaded ranking CSV", season_projection=projection, average_draft_position=adp, draft_pool_rank=index))
+                if not players:
+                    raise ValueError("NO_VALID_PLAYERS")
+                teams = [Team(id=str(index), name=manual_team if index == 1 else f"Team {index}", players=[]) for index in range(1, int(manual_size) + 1)]
+                league = League(id="manual-session", name="Manual Draft", season=datetime.now(UTC).year, week=1, user_team_id="1", roster_slots=["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "DST", "K"], teams=teams, free_agents=players, draft_pool=players, raw_settings={"size": int(manual_size), "draftSettings": {"type": "SNAKE"}, "_manual_setup": True})
+                st.session_state.league = league
+                st.session_state.league_connected = True
+                st.session_state.mode = "manual"
+                st.session_state.espn_connection = None
+                st.session_state.draft_league_size = int(manual_size)
+                st.session_state.draft_manager_confirmed = True
+                st.session_state.draft_slot = None
+                st.session_state.draft_slot_confirmed = False
+                st.session_state.draft_setup_confirmed = False
+                st.session_state.pending_page = "Draft"
+                st.rerun()
+            except (UnicodeDecodeError, ValueError, TypeError):
+                st.error("The CSV could not be used. Include valid player and position columns; optional numeric rank, ADP, and projection values must be numbers.")
     if st.button("Disconnect league"):
         st.session_state.league = None
         st.session_state.espn_connection = None
         st.session_state.mode = "disconnected"
         st.session_state.league_connected = False
         st.session_state.draft_picks = []
+        st.session_state.draft_setup_confirmed = False
+        st.session_state.draft_manager_confirmed = False
+        st.session_state.draft_slot_confirmed = False
+        st.session_state.draft_manual_started = False
+        st.session_state.draft_ignored = []
         st.session_state.playoff_scenarios = []
         st.session_state.playoff_scenario_history = []
         st.session_state.simulation_cache = {}
@@ -718,12 +802,13 @@ def page_draft(league) -> None:
 
 
 def draft_settings_from_state(league) -> DraftSettings:
-    league_size = league_team_count(league)
+    config = st.session_state.get("draft_configuration")
+    league_size = config.league_size if config else league_team_count(league)
     current_pick = max(1, int(st.session_state.current_pick))
-    draft_slot = min(max(1, int(st.session_state.draft_slot)), league_size)
+    draft_slot = min(max(1, int(st.session_state.draft_slot or 1)), league_size)
     st.session_state.current_pick = current_pick
     st.session_state.draft_slot = draft_slot
-    draft_type = league_draft_type(league)
+    draft_type = config.draft_type if config else league_draft_type(league)
     if draft_type == "snake":
         next_pick = snake_next_pick(current_pick, draft_slot, league_size)
     else:
@@ -734,64 +819,214 @@ def draft_settings_from_state(league) -> DraftSettings:
 
 
 def page_draft_intelligence(league) -> None:
-    section_header("Pre-Draft Pick Plan", "Your recommended targets before the draft starts, mapped to your snake-draft position.")
+    section_header("2. My Draft Plan", "Realistic targets at every pick you own. Future availability is estimated, never promised.")
     settings = draft_settings_from_state(league)
     drafted = {pick["player_id"] for pick in st.session_state.draft_picks}
     board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted)
     draft_type = league_draft_type(league)
-    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=min(25, int(st.session_state.draft_rounds)), strategy=st.session_state.draft_strategy) if draft_type == "snake" else []
-    st.caption("Uses the connected ESPN draft pool, ESPN ADP when available, ESPN draft rank, and ESPN season projections when available.")
+    if draft_type == "auction":
+        st.info("Auction drafts do not have round-owned picks. Live Draft will rank nominations after you start it.")
+        return
+    plan = DEFAULT_DRAFT_SERVICE.overall_pick_plan(league, int(st.session_state.draft_slot), rounds=min(30, int(st.session_state.draft_rounds)), strategy=st.session_state.draft_strategy, draft_type=draft_type)
     if not board:
         pool = league.draft_pool or league.free_agents
         if not pool:
-            render_draft_pool_diagnostics(league)
+            st.warning("ESPN has not returned a usable player pool yet. Reconnect or try again shortly.")
         else:
-            st.info(f"ESPN returned {len(pool)} normalized draft-pool players, but none of the remaining QB/RB/WR/TE players had ADP, draft rank, season projection, or ownership data.")
+            st.warning("A real player pool was returned, but there is not enough legitimate ranking information to build a plan.")
         return
-    if draft_type != "snake":
-        st.warning(f"ESPN reports a {draft_type} draft. A snake pick-number plan would be inaccurate, so Fourth Down is showing the overall board instead.")
-    if plan:
-        st.subheader(f"Your first {len(plan)} {st.session_state.draft_strategy} targets from slot {int(st.session_state.draft_slot)}")
-        st.dataframe(
-            [{"Round": row["round"], "Overall pick": row["overall_pick"], "Target": row["player_name"], "Pos": row["position"], "Team": row["team"], "ESPN ADP/rank": row["consensus_adp"], "Projection": row["season_projection"], "Backups": ", ".join(row["backups"])} for row in plan],
-            hide_index=True,
-            use_container_width=True,
-        )
-        st.caption("This is a pre-draft plan, not a claim that each player will remain available. The Live Draft tab recalculates from the players you record as selected.")
-    st.subheader("Overall remaining board")
-    st.dataframe(
-        [
-            {
-                "Tier": row.get("tier"),
-                "Player": row["player_name"],
-                "Pos": row["position"],
-                "Team": row["team"],
-                "ESPN ADP": row["consensus_adp"],
-                "ESPN Rank": row.get("espn_rank"),
-                "Season Projection": row.get("season_projection"),
-                "Expected VOR": row["expected_vor"],
-                "ADP Value": row.get("adp_relative_value", "fallback"),
-                "% Rostered": row.get("percent_owned"),
-                "Confidence": row.get("confidence", "fallback"),
-            }
-            for row in board
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
-    selected = st.selectbox("Player detail", board, format_func=lambda row: f"{row['player_name']} ({row['position']})")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Expected VOR", selected["expected_vor"])
-    c2.metric("Season Projection", selected.get("season_projection", "n/a"))
-    c3.metric("ADP Value", selected.get("adp_relative_value", "n/a"))
-    c4.metric("ESPN ADP", selected.get("consensus_adp", "n/a"))
-    st.write("Explanation")
-    st.write("- Expected VOR compares ESPN season projection with league replacement level when that projection is available.")
-    st.write("- ADP-relative value compares ESPN's season projection with the live ESPN player pool's replacement level and draft cost.")
-    st.write("- No next-pick probability is shown because ESPN does not provide a live probability that a player survives to your next pick.")
+    st.caption("Targets are recalculated after each planned selection. They are possibilities, not guarantees.")
+    index = 0
+    while index < len(plan):
+        row = plan[index]
+        next_row = plan[index + 1] if index + 1 < len(plan) else None
+        consecutive = next_row and next_row["overall_pick"] == row["overall_pick"] + 1
+        if consecutive:
+            pair_settings = DraftSettings(league_size=settings.league_size, current_pick=row["overall_pick"], next_pick=next_row["overall_pick"], draft_type="snake")
+            pairs = DEFAULT_DRAFT_SERVICE.turn_pair_plan(league, pair_settings, int(st.session_state.draft_slot), set(), [], st.session_state.draft_strategy)
+            st.subheader(f"ROUNDS {row['round']}–{next_row['round']} · PICKS {row['overall_pick']} AND {next_row['overall_pick']}")
+            if pairs:
+                best_pair = pairs[0]
+                st.write(f"**Best combination:** {best_pair['first']['player_name']} ({best_pair['first']['position']}) + {best_pair['second']['player_name']} ({best_pair['second']['position']})")
+                for alternative in pairs[1:3]:
+                    st.write(f"Alternative: {alternative['first']['player_name']} + {alternative['second']['player_name']}")
+            index += 2
+            continue
+        st.subheader(f"ROUND {row['round']} · PICK {row['overall_pick']}")
+        st.write("**Primary targets**")
+        for target_index, target in enumerate(row.get("primary_targets", []), 1):
+            st.write(f"{target_index}. **{target['player_name']}** · {target['position']} · {target['team']} · Fourth Down #{target['fourth_down_rank']} · ADP {target['consensus_adp']} · Tier {target['tier']} · {target['availability_label']}")
+            st.caption(target["recommendation_reason"])
+        backups = row.get("backup_targets", [])
+        if backups:
+            st.write("**Backups:** " + " · ".join(f"{target['player_name']} ({target['position']})" for target in backups))
+        st.write("**Plan:** " + row.get("instruction", "Take the strongest remaining tier that fits your roster."))
+        index += 1
+    with st.expander("Advanced methodology and data status"):
+        st.write("Fourth Down combines league scoring, roster fit, market cost, projection value, tier scarcity, injury risk, and risk of waiting. ESPN ADP is a market input—not the recommendation by itself.")
+        diagnostics = league.raw_settings.get("_draft_pool_diagnostics", {})
+        st.write(f"Player pool: {diagnostics.get('normalized_player_count', len(league.draft_pool))} players · Status: {diagnostics.get('status', 'available')}")
 
 
 def page_draft_room(league) -> None:
+    section_header("3. Live Draft", "The recommendation updates after every recorded or ESPN-synced selection.")
+    config = st.session_state.get("draft_configuration")
+    espn_picks = list(league.raw_settings.get("_draft_picks", []))
+    live_started = bool(espn_picks or st.session_state.get("draft_picks") or st.session_state.get("draft_manual_started"))
+    if not live_started:
+        st.info("Waiting for your ESPN draft to begin.")
+        st.write(f"Your setup is ready: **{config.league_size} teams · {config.draft_type.title()} · Seat {config.draft_slot or 'N/A'}**")
+        check, manual = st.columns(2)
+        if check.button("Check Draft Status", type="primary", use_container_width=True):
+            connection = st.session_state.get("espn_connection")
+            if not connection:
+                st.warning("Reconnect the league once to enable ESPN draft checks. Manual mode is still available.")
+            elif action_allowed("espn-draft-sync", 20, 300):
+                try:
+                    refreshed = asyncio.run(connect_espn(**connection))
+                    picks = synced_picks_for_configuration(list(refreshed.raw_settings.get("_draft_picks", [])), config)
+                    st.session_state.league = refreshed
+                    st.session_state.draft_last_sync = datetime.now(UTC).isoformat()
+                    if picks:
+                        st.session_state.draft_picks = picks
+                        st.session_state.current_pick = max(int(pick["number"]) for pick in picks) + 1
+                        st.session_state.draft_ignored = []
+                        st.rerun()
+                    st.info("ESPN has not published a completed pick yet.")
+                except Exception:
+                    st.warning("ESPN draft status could not be refreshed. Your setup and any manual picks are unchanged.")
+        if manual.button("Start Manual Live Draft", use_container_width=True):
+            st.session_state.draft_manual_started = True
+            st.session_state.current_pick = 1
+            st.rerun()
+        with st.expander("How ESPN synchronization works"):
+            st.write("Fourth Down refreshes only when you press the button. ESPN’s unofficial fantasy endpoints do not provide a guaranteed real-time event stream, so the app does not claim second-by-second sync.")
+        return
+
+    if st.session_state.get("draft_paused"):
+        st.warning("Draft paused. Recommendations and pick entry are frozen.")
+        if st.button("Resume Draft", type="primary"):
+            st.session_state.draft_paused = False
+            st.rerun()
+        return
+    refresh_a, refresh_b = st.columns([1, 2])
+    if refresh_a.button("Refresh ESPN Picks", use_container_width=True):
+        connection = st.session_state.get("espn_connection")
+        if not connection:
+            refresh_b.warning("This manual draft has no ESPN refresh connection.")
+        elif action_allowed("espn-draft-sync", 20, 300):
+            try:
+                refreshed = asyncio.run(connect_espn(**connection))
+                picks = synced_picks_for_configuration(list(refreshed.raw_settings.get("_draft_picks", [])), config)
+                st.session_state.league = refreshed
+                st.session_state.draft_last_sync = datetime.now(UTC).isoformat()
+                if picks:
+                    st.session_state.draft_picks = picks
+                    st.session_state.current_pick = max(int(pick["number"]) for pick in picks) + 1
+                    st.session_state.draft_ignored = []
+                    st.rerun()
+                refresh_b.info("ESPN returned no completed selections. Existing manual picks were preserved.")
+            except Exception:
+                refresh_b.warning("ESPN refresh failed. Existing picks and recommendations were preserved.")
+    current_pick = max(1, int(st.session_state.current_pick))
+    league_size = config.league_size
+    draft_type = config.draft_type
+    round_number = (current_pick - 1) // league_size + 1
+    pick_in_round = (current_pick - 1) % league_size + 1
+    owner_slot = owner_of_pick(current_pick, league_size, draft_type) if draft_type != "auction" else 0
+    next_user_pick = config.user_owned_picks[0] if config.user_owned_picks else None
+    if draft_type != "auction":
+        next_user_pick = next((pick for pick in config.user_owned_picks if pick >= current_pick), None)
+    drafted_ids = {str(pick["player_id"]) for pick in st.session_state.draft_picks}
+    ignored_ids = set(st.session_state.get("draft_ignored", []))
+    user_positions = [str(pick.get("position", "UNKNOWN")) for pick in st.session_state.draft_picks if int(pick.get("owner_slot") or 0) == int(config.draft_slot or 0)]
+    next_after = next((pick for pick in config.user_owned_picks if pick > current_pick), current_pick + league_size)
+    settings = DraftSettings(league_size=league_size, current_pick=current_pick, next_pick=next_after, draft_type=draft_type)
+    recommendations = DEFAULT_DRAFT_SERVICE.pick_plan(league, settings, drafted_ids | ignored_ids, user_positions, backup_count=3, strategy=st.session_state.draft_strategy, recent_drafted_positions=[pick.get("position", "UNKNOWN") for pick in st.session_state.draft_picks])
+    on_clock = draft_type == "auction" or owner_slot == config.draft_slot
+    if on_clock:
+        st.success(f"YOU’RE ON THE CLOCK · Round {round_number} · Pick {current_pick}")
+    else:
+        away = max(0, int(next_user_pick or current_pick) - current_pick)
+        st.subheader(f"PICK {current_pick} · TEAM {owner_slot} ON THE CLOCK")
+        st.write(f"**Your next pick:** Pick {next_user_pick} · {away} selection{'s' if away != 1 else ''} away")
+    if recommendations:
+        best, backups = recommendations[0], recommendations[1:4]
+        heading = "DRAFT" if on_clock else "CURRENT PLAN"
+        st.subheader(f"{heading} {best['player_name']}")
+        st.write(f"**{best['position']} · {best['team']} · Tier {best['tier']}**")
+        st.write("**Why**")
+        reasons = [part.strip().capitalize() for part in best["recommendation_reason"].rstrip(".").split(";")][:3]
+        for reason in reasons:
+            st.write(f"- {reason}")
+        if backups:
+            st.write("**Backups**")
+            for index, player in enumerate(backups, 1):
+                st.write(f"{index}. {player['player_name']} · {player['position']} · {player['availability_label']}")
+        if on_clock:
+            action_a, action_b, action_c = st.columns(3)
+            if action_a.button("Drafted", type="primary", use_container_width=True):
+                state = canonical_draft_state(league).record(DraftSelection(overall_pick=current_pick, round_number=round_number, pick_in_round=pick_in_round, owner_slot=owner_slot, player_id=best["player_id"], player_name=best["player_name"], position=best["position"], source="manual"))
+                st.session_state.draft_picks = draft_state_rows(state)
+                st.session_state.current_pick = state.current_overall_pick
+                st.session_state.draft_ignored = []
+                st.rerun()
+            if action_b.button("Ignore for this pick", use_container_width=True):
+                st.session_state.draft_ignored = [*ignored_ids, best["player_id"]]
+                st.rerun()
+            with action_c.expander("View alternatives"):
+                for player in backups:
+                    st.write(f"{player['player_name']} · {player['position']} · Tier {player['tier']}")
+    else:
+        st.warning("No legitimate recommendation is available from the remaining player data.")
+
+    board = DEFAULT_DRAFT_SERVICE.current_board(league, settings, drafted_ids)
+    if board:
+        selected = st.selectbox("Player drafted", board, format_func=lambda row: f"{row['player_name']} · {row['position']} · {row['team']}")
+        if st.button("Record Pick", use_container_width=True):
+            state = canonical_draft_state(league).record(DraftSelection(overall_pick=current_pick, round_number=round_number, pick_in_round=pick_in_round, owner_slot=owner_slot, player_id=selected["player_id"], player_name=selected["player_name"], position=selected["position"], source="manual"))
+            st.session_state.draft_picks = draft_state_rows(state)
+            st.session_state.current_pick = state.current_overall_pick
+            st.session_state.draft_ignored = []
+            st.rerun()
+    controls = st.columns(4)
+    if controls[0].button("Undo last pick", disabled=not st.session_state.draft_picks):
+        state = canonical_draft_state(league).undo()
+        st.session_state.draft_picks = draft_state_rows(state)
+        st.session_state.current_pick = state.current_overall_pick
+        st.session_state.draft_ignored = []
+        st.rerun()
+    if controls[1].button("Pause draft"):
+        st.session_state.draft_paused = True
+        st.rerun()
+    with controls[2].popover("Correct pick"):
+        if st.session_state.draft_picks and board:
+            correction_pick = st.selectbox("Recorded pick", st.session_state.draft_picks, format_func=lambda pick: f"Pick {pick['number']}: {pick.get('player_name')}")
+            correction_player = st.selectbox("Correct player", board, format_func=lambda row: f"{row['player_name']} · {row['position']}")
+            if st.button("Save correction"):
+                number = int(correction_pick["number"])
+                replacement = DraftSelection(overall_pick=number, round_number=(number - 1) // league_size + 1, pick_in_round=(number - 1) % league_size + 1, owner_slot=int(correction_pick["owner_slot"]), player_id=correction_player["player_id"], player_name=correction_player["player_name"], position=correction_player["position"], source="manual-correction")
+                state = canonical_draft_state(league).correct(number, replacement)
+                st.session_state.draft_picks = draft_state_rows(state)
+                st.rerun()
+    with controls[3].popover("Reset draft"):
+        reset_confirmed = st.checkbox("I understand this removes every recorded pick")
+        if st.button("Reset now", disabled=not reset_confirmed):
+            state = canonical_draft_state(league).reset(confirmed=True)
+            st.session_state.draft_picks = draft_state_rows(state)
+            st.session_state.current_pick = 1
+            st.session_state.draft_manual_started = False
+            st.session_state.draft_ignored = []
+            st.rerun()
+    if st.session_state.get("draft_last_sync"):
+        st.caption(f"Last successful ESPN refresh: {st.session_state.draft_last_sync}. Manual refresh only.")
+    with st.expander("Why this recommendation? Advanced details"):
+        if recommendations:
+            best = recommendations[0]
+            st.write(f"Fourth Down rank: {best['fourth_down_rank']} · ADP: {best['consensus_adp']} · Value over replacement: {best.get('expected_vor', 'Unavailable')} · Risk of waiting: {best.get('cost_of_waiting', 0):.1f}")
+        st.write("The engine weighs league-adjusted value, roster fit, tier scarcity, market cost, injury risk, and likely alternatives at your next pick.")
+    return
+
     section_header("Who Should I Draft?", "A live pick-by-pick answer using your draft slot, roster construction, ESPN projections, ADP, and value over replacement.")
     league_size = league_team_count(league)
     sync_a, sync_b = st.columns([1, 2])
@@ -1380,48 +1615,88 @@ def page_league(league) -> None:
 
 def page_draft_context(league) -> None:
     st.header("Draft")
-    st.caption("Start with your slot-based overall pick plan, then use Live Draft to recalculate after every selection.")
-    espn_size = league_team_count(league)
-    setup_size, setup_rounds = st.columns(2)
-    st.session_state.draft_league_size = setup_size.slider(
-        "Managers in draft",
-        min_value=4,
-        max_value=20,
-        value=min(20, max(4, int(st.session_state.draft_league_size or espn_size))),
-        help=f"ESPN reports {espn_size}. Change this only if ESPN is wrong or managers have not been finalized.",
-    )
-    st.session_state.draft_rounds = setup_rounds.slider("Draft rounds", min_value=1, max_value=25, value=min(25, max(1, int(st.session_state.draft_rounds))))
+    st.caption("Set up once. Then use your round plan before the draft and one clear recommendation while drafting.")
+    manager_resolution = resolve_manager_count(league, st.session_state.get("draft_league_size"), manual_confirmed=bool(st.session_state.get("draft_manager_confirmed")))
+    seat_resolution = resolve_draft_slot(league, st.session_state.get("draft_slot"), manual_confirmed=bool(st.session_state.get("draft_slot_confirmed")))
+    if not st.session_state.get("draft_setup_confirmed"):
+        section_header("1. Draft Setup", "Confirm the facts that control every pick and recommendation.")
+        if manager_resolution.conflict_values:
+            st.warning(manager_resolution.message + " Confirm the correct draft size below.")
+        elif manager_resolution.message:
+            st.info(manager_resolution.message)
+        if seat_resolution.source == "unavailable":
+            st.info("ESPN has not published your draft order yet. Select your expected draft seat for planning. You can change this later.")
+        team = next((item for item in league.teams if item.id == league.user_team_id), None)
+        default_size = int(st.session_state.get("draft_league_size") or manager_resolution.value or max(4, len(league.teams)))
+        default_slot = min(default_size, max(1, int(st.session_state.get("draft_slot") or seat_resolution.value or 1)))
+        settings = league.raw_settings if isinstance(league.raw_settings, dict) else {}
+        counts = (settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
+        defaults = {slot: league.roster_slots.count(slot) for slot in ("QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "DST", "K")}
+        default_bench = int(counts.get("20", counts.get(20, 7)) or 7)
+        with st.form("draft-setup"):
+            a, b, c = st.columns(3)
+            if manager_resolution.conflict_values:
+                manager_choice = a.radio("Confirm the correct draft size", [*[str(value) for value in manager_resolution.conflict_values], "Custom"])
+                managers = a.number_input("Custom manager count", 4, 20, default_size, 1, disabled=manager_choice != "Custom") if manager_choice == "Custom" else int(manager_choice)
+            else:
+                managers = a.number_input("Number of managers", 4, 20, default_size, 1)
+            espn_type = league_draft_type(league)
+            draft_type = b.selectbox("Draft type", ["snake", "linear", "auction"], index=["snake", "linear", "auction"].index(espn_type))
+            seat = c.selectbox("Your draft seat", list(range(1, int(managers) + 1)), index=min(default_slot, int(managers)) - 1, disabled=draft_type == "auction")
+            d, e, f = st.columns(3)
+            detected_scoring = build_draft_configuration(league, league_size=int(managers)).scoring_format
+            scoring = d.selectbox("Scoring format", ["full PPR", "half PPR", "standard"], index=["full PPR", "half PPR", "standard"].index(detected_scoring))
+            bench = e.number_input("Bench players", 0, 20, default_bench, 1)
+            rounds = f.number_input("Draft rounds", 1, 30, max(1, len(league.roster_slots) + default_bench), 1)
+            st.caption("Starters")
+            slot_columns = st.columns(4)
+            slot_counts = {}
+            for index, slot_name in enumerate(("QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "DST", "K")):
+                slot_counts[slot_name] = slot_columns[index % 4].number_input(slot_name, 0, 5, int(defaults.get(slot_name, 0)), 1, key=f"setup-{slot_name}")
+            pool = league.draft_pool or league.free_agents
+            keepers = st.multiselect("Keepers (optional)", pool, format_func=lambda player: f"{player.name} · {player.position}")
+            st.caption(f"Your team: {(team.name if team else 'Selected ESPN team')} · Your draft seat: {seat if draft_type != 'auction' else 'Not applicable'} of {managers}")
+            confirmed = st.form_submit_button("Confirm Draft Setup", type="primary", use_container_width=True)
+        if confirmed:
+            starting_slots = [slot for slot, count in slot_counts.items() for _ in range(int(count))]
+            config = build_draft_configuration(
+                league, league_size=int(managers), draft_slot=int(seat) if draft_type != "auction" else None,
+                total_rounds=int(rounds), keeper_player_ids={player.id for player in keepers}, manager_count_confirmed=True,
+                draft_slot_confirmed=True, draft_type=draft_type, scoring_format=scoring, starting_slots=starting_slots, bench_slots=int(bench),
+            )
+            st.session_state.draft_configuration = config
+            st.session_state.draft_league_size = int(managers)
+            st.session_state.draft_slot = int(seat) if draft_type != "auction" else None
+            st.session_state.draft_rounds = int(rounds)
+            st.session_state.draft_manager_confirmed = True
+            st.session_state.draft_slot_confirmed = True
+            st.session_state.draft_setup_confirmed = True
+            st.session_state.draft_workspace = "My Draft Plan"
+            st.session_state.draft_picks = []
+            st.session_state.current_pick = 1
+            st.session_state.draft_ignored = []
+            st.rerun()
+        return
+
+    config = st.session_state.draft_configuration
+    team = next((item for item in league.teams if item.id == league.user_team_id), None)
+    st.success(f"YOUR DRAFT · {config.league_size}-team {config.draft_type} · Seat {config.draft_slot or 'N/A'} · {config.scoring_format}")
+    slot_summary = " · ".join(f"{config.starting_slots.count(slot)} {slot}" for slot in dict.fromkeys(config.starting_slots)) or "None"
+    st.caption(f"Your team: {team.name if team else 'Selected ESPN team'} · Starters: {slot_summary} · Bench: {config.bench_slots} · Keepers: {len(config.keeper_player_ids)}")
+    if st.button("Edit Draft Setup"):
+        st.session_state.draft_setup_confirmed = False
+        st.session_state.draft_picks = []
+        st.session_state.current_pick = 1
+        st.session_state.draft_ignored = []
+        st.rerun()
     configured_settings = dict(league.raw_settings)
-    configured_settings["size"] = int(st.session_state.draft_league_size)
-    league = league.model_copy(update={"raw_settings": configured_settings})
-    league_size = league_team_count(league)
-    draft_type = league_draft_type(league)
-    control_a, control_b, control_c = st.columns([1, 1.5, 2])
-    st.session_state.draft_slot = control_a.number_input("Your draft seat", min_value=1, max_value=league_size, value=min(int(st.session_state.draft_slot), league_size), step=1)
-    control_b.metric("Draft configuration", draft_type.title(), f"{league_size} managers · {st.session_state.draft_rounds} rounds")
-    st.session_state.draft_strategy = control_c.radio(
-        "Draft mindset",
-        ["safe", "balanced", "aggressive"],
-        index=["safe", "balanced", "aggressive"].index(st.session_state.draft_strategy),
-        horizontal=True,
-        format_func=lambda value: value.title(),
-        help="Safe prioritizes projection reliability and health. Balanced combines value, need, and availability. Aggressive emphasizes ADP discounts and upside.",
-    )
-    if draft_type == "snake" and int(st.session_state.draft_slot) == league_size:
-        st.info(f"Turn confirmed: slot {league_size} owns picks {league_size} and {league_size + 1}, then {league_size * 3} and {league_size * 3 + 1}.")
-    config = build_draft_configuration(league, league_size=league_size, draft_slot=int(st.session_state.draft_slot), current_overall_pick=int(st.session_state.current_pick), total_rounds=int(st.session_state.draft_rounds))
-    slot_summary = " · ".join(f"{config.starting_slots.count(slot)} {slot}" for slot in dict.fromkeys(config.starting_slots))
-    st.caption(f"{config.league_size} managers · {config.draft_type.title()} · Seat {config.draft_slot} · {config.scoring_format} · {slot_summary} · {config.bench_slots} bench")
-    workspace = st.radio(
-        "Draft workspace",
-        ["Who Should I Draft?", "Overall Pick Plan"],
-        key="draft_workspace",
-        horizontal=True,
-    )
-    if workspace == "Who Should I Draft?":
-        page_draft_room(league)
-    else:
+    configured_settings["size"] = config.league_size
+    league = league.model_copy(update={"raw_settings": configured_settings, "roster_slots": config.starting_slots})
+    workspace = st.radio("Draft", ["My Draft Plan", "Live Draft"], key="draft_workspace", horizontal=True, label_visibility="collapsed")
+    if workspace == "My Draft Plan":
         page_draft_intelligence(league)
+    else:
+        page_draft_room(league)
 
 
 def page_settings(league) -> None:

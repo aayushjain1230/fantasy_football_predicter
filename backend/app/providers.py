@@ -234,7 +234,10 @@ async def connect_espn(
         assumptions.append("Multi-week playoff length is preserved for display; the simulator treats supported playoffs as one scoring period per round unless ESPN's raw settings clearly specify otherwise.")
     rules = LeagueRuleSet(regular_season_start=1, regular_season_end=regular_season_end, playoff_start=regular_season_end + 1, playoff_end=int(schedule_settings.get("playoffMatchupPeriodCount", regular_season_end + 3) or regular_season_end + 3), playoff_matchup_period_length=int(schedule_settings.get("playoffMatchupPeriodLength", 1) or 1), first_round_byes=first_byes, tiebreaker="record_then_points_for", reseeding="fixed", unsupported=unsupported, assumptions=assumptions, raw=schedule_settings)
     draft_picks = []
-    draft_size = max(2, int(settings.get("size") or len(teams) or 12))
+    try:
+        draft_size = int(settings.get("size") or len({team.id for team in teams}) or 0)
+    except (TypeError, ValueError):
+        draft_size = 0
     draft_type = str((settings.get("draftSettings") or {}).get("type") or "SNAKE").upper()
     player_lookup = {player.id: player for team in teams for player in team.players}
     player_lookup.update({player.id: player for player in draft_pool})
@@ -244,9 +247,9 @@ async def connect_espn(
             continue
         player = player_lookup.get(player_id)
         pick_number = int(raw_pick.get("overallPickNumber") or len(draft_picks) + 1)
-        round_index = (pick_number - 1) // draft_size
-        pick_in_round = ((pick_number - 1) % draft_size) + 1
-        owner_slot = draft_size - pick_in_round + 1 if "SNAKE" in draft_type and round_index % 2 else pick_in_round
+        round_index = (pick_number - 1) // draft_size if draft_size >= 2 else 0
+        pick_in_round = ((pick_number - 1) % draft_size) + 1 if draft_size >= 2 else pick_number
+        owner_slot = (draft_size - pick_in_round + 1 if "SNAKE" in draft_type and round_index % 2 else pick_in_round) if draft_size >= 2 else 0
         draft_picks.append({
             "number": pick_number,
             "owner_slot": owner_slot,
@@ -258,6 +261,18 @@ async def connect_espn(
         })
     normalized_settings = dict(settings)
     normalized_settings["_draft_picks"] = sorted(draft_picks, key=lambda pick: pick["number"])
+    raw_order = (raw.get("draftDetail") or {}).get("draftOrder") or {}
+    normalized_order = {}
+    if isinstance(raw_order, dict):
+        for team_key, slot_value in raw_order.items():
+            try:
+                normalized_order[str(team_key)] = int(slot_value)
+            except (TypeError, ValueError):
+                continue
+    normalized_settings["_draft_order"] = normalized_order
+    if draft_picks:
+        first_round = [pick for pick in draft_picks if draft_size >= 2 and int(pick["number"]) <= draft_size and pick.get("team_id")]
+        normalized_settings["_live_draft_order"] = {str(pick["team_id"]): int(pick["number"]) for pick in first_round}
     normalized_settings["_draft_pool_diagnostics"] = pool_diagnostics
     return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, draft_pool=draft_pool, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=normalized_settings)
 
