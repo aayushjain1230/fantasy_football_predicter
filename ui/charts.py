@@ -5,7 +5,7 @@ CHART_COLORS = {
     "green": "#4ADE80",
     "blue": "#3B82F6",
     "gold": "#FBBF24",
-    "orange": "#FF6A13",
+    "orange": "#FF5722",
     "red": "#EF4444",
     "purple": "#8B5CF6",
     "muted": "#5E6878",

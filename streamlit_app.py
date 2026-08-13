@@ -612,9 +612,16 @@ def page_connect() -> None:
     page_header("Connect Your Fantasy League", "League Setup", "Import your league to personalize draft, lineup, waiver, and trade recommendations.")
     espn_tab, sleeper_tab, manual_tab = st.tabs(["ESPN", "Sleeper", "Manual Setup"])
     with espn_tab:
+        st.markdown(
+            '<div class="fd-provider-grid">'
+            '<div class="fd-provider-card fd-provider-card--selected"><div class="fd-provider-name">ESPN</div><div class="fd-provider-copy">League URL import with private-session fallback.</div></div>'
+            '<div class="fd-provider-card"><div class="fd-provider-name">Sleeper</div><div class="fd-provider-copy">Not connected yet.</div></div>'
+            '<div class="fd-provider-card"><div class="fd-provider-name">Manual</div><div class="fd-provider-copy">Enter your league rules yourself.</div></div>'
+            '</div>', unsafe_allow_html=True,
+        )
         section_header("ESPN", "Import league settings, teams, rosters, scoring, and available draft information.")
-        st.markdown("**Fourth Down never sees or stores your ESPN password.**")
-        st.caption("Fourth Down uses league data in read-only mode and never makes roster changes on your behalf.")
+        st.markdown('<div class="fd-security-note"><strong>Fourth Down never sees or stores your ESPN password.</strong><br>League data is read-only; Fourth Down never makes roster changes on your behalf.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="fd-connect-panel"><div class="fd-provider-name">Connect ESPN</div><div class="fd-provider-copy">Open your league in ESPN, then paste its address below.</div></div>', unsafe_allow_html=True)
         with st.form("espn-url-connect", clear_on_submit=False):
             league_url = st.text_input("Paste ESPN league URL", placeholder="Open your ESPN league and paste the URL here")
             with st.expander("Private league · advanced session connection"):
@@ -637,20 +644,22 @@ def page_connect() -> None:
                 st.session_state.connection_error = {"status": status.value, "message": message}
         error = st.session_state.get("connection_error")
         if error:
+            st.markdown('<div class="fd-connect-status fd-connect-status--error">ESPN connection needs attention</div>', unsafe_allow_html=True)
             st.error(error["message"])
         candidate = st.session_state.get("espn_candidate")
         parsed = st.session_state.get("espn_candidate_url")
         if isinstance(candidate, League) and parsed:
+            st.markdown('<div class="fd-connect-status fd-connect-status--success">League found · confirm your team</div>', unsafe_allow_html=True)
             section_header("Choose Your Team", "ESPN returned this league. Confirm which team is yours before activating it.")
             manager = resolve_manager_count(candidate)
             seat = resolve_draft_slot(candidate)
             selected_team = st.selectbox("Your team", candidate.teams, format_func=lambda team: team.name, key="candidate-team")
             card_league = select_team(candidate, selected_team.id)
             st.markdown(
-                f'<div class="fd-league-card"><div class="fd-league-name">{h(card_league.name)}</div>'
+                f'<div class="fd-league-grid"><div class="fd-league-card fd-league-card--active"><div class="fd-league-name">{h(card_league.name)}</div>'
                 f'<div class="fd-league-meta">{card_league.season} · {manager.value or "Confirm size"} Teams · {h(build_draft_configuration(card_league).scoring_format)} · {h(league_draft_type(card_league).title())} Draft</div>'
                 f'<div class="fd-league-team">Your Team: {h(selected_team.name)}</div>'
-                f'<div class="fd-league-status">Draft Position: {seat.value if seat.source in {"espn_draft_order", "espn_live_draft"} else "Not Published"}</div></div>',
+                f'<div class="fd-league-status">Draft Position: {seat.value if seat.source in {"espn_draft_order", "espn_live_draft"} else "Not Published"}</div></div></div>',
                 unsafe_allow_html=True,
             )
             if st.button("Use This League", type="primary", use_container_width=True):
@@ -662,8 +671,10 @@ def page_connect() -> None:
         with st.expander("One-click browser connection"):
             st.info("Coming after a dedicated encrypted HTTPS handshake service is deployed and tested. The extension is not active in this Streamlit deployment.")
     with sleeper_tab:
+        st.markdown('<div class="fd-provider-grid"><div class="fd-provider-card"><div class="fd-provider-name">ESPN</div></div><div class="fd-provider-card fd-provider-card--selected"><div class="fd-provider-name">Sleeper</div><div class="fd-provider-copy">Unavailable in this release.</div></div><div class="fd-provider-card"><div class="fd-provider-name">Manual</div></div></div>', unsafe_allow_html=True)
         st.info("Sleeper import is not connected yet. Fourth Down will not pretend a league was imported. Use ESPN or Manual Setup.")
     with manual_tab:
+        st.markdown('<div class="fd-provider-grid"><div class="fd-provider-card"><div class="fd-provider-name">ESPN</div></div><div class="fd-provider-card"><div class="fd-provider-name">Sleeper</div></div><div class="fd-provider-card fd-provider-card--selected"><div class="fd-provider-name">Manual</div><div class="fd-provider-copy">You control every league setting.</div></div></div>', unsafe_allow_html=True)
         section_header("Manual Setup", "Use real settings you enter. Manual leagues are always labeled Manual.")
         with st.form("manual-league-setup"):
             name = st.text_input("League name", "My League")
@@ -1845,7 +1856,7 @@ def page_settings(league) -> None:
         st.write(f"Team: **{team.name}** · Season {league.season} · Week {league.week}")
         active = st.session_state.get("active_league")
         if isinstance(active, ActiveLeagueState):
-            st.caption(f"Last synchronized {active.last_synced_at.astimezone().strftime('%b %d, %Y · %I:%M %p')}")
+            st.markdown(f'<div class="fd-sync-indicator">Last synchronized {h(active.last_synced_at.astimezone().strftime("%b %d, %Y · %I:%M %p"))}</div>', unsafe_allow_html=True)
             if active.connection_status == LeagueConnectionStatus.EXPIRED:
                 st.error(active.sync_message)
                 if st.button("Reconnect ESPN", use_container_width=True):
