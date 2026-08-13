@@ -39,6 +39,20 @@ try:
 except Exception:
     pass
 
+# Streamlit Cloud can retain backend modules across entry-point hot reloads.
+# Load the domain contract before modules that import it, and refresh only when
+# the deployed connection symbols are missing from the cached module object.
+from app import domain as _domain  # noqa: E402
+
+if not hasattr(_domain, "ActiveLeagueState") or not hasattr(_domain, "LeagueConnectionStatus"):
+    _domain = importlib.reload(_domain)
+
+ActiveLeagueState = _domain.ActiveLeagueState
+League = _domain.League
+LeagueConnectionStatus = _domain.LeagueConnectionStatus
+Player = _domain.Player
+Team = _domain.Team
+
 from app.advanced import (  # noqa: E402
     calibration_summary,
     draft_board,
@@ -50,7 +64,6 @@ from app.advanced import (  # noqa: E402
     what_if,
 )
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
-from app.domain import ActiveLeagueState, League, LeagueConnectionStatus, Player, Team  # noqa: E402
 from app import draft_intelligence as _draft_intelligence  # noqa: E402
 
 # Streamlit Cloud may hot-reload this entry point while retaining the previous
