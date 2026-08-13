@@ -319,6 +319,8 @@ async def connect_espn(
         first_round = [pick for pick in draft_picks if draft_size >= 2 and int(pick["number"]) <= draft_size and pick.get("team_id")]
         normalized_settings["_live_draft_order"] = {str(pick["team_id"]): int(pick["number"]) for pick in first_round}
     normalized_settings["_draft_pool_diagnostics"] = pool_diagnostics
+    normalized_settings["_team_selection_required"] = team_id is None and len(teams) > 1
+    normalized_settings["_selected_team_source"] = "explicit" if team_id is not None else "temporary_first_team"
     return League(id=str(raw.get("id", league_id)), name=settings.get("name", "ESPN League"), season=season, week=current_period, user_team_id=str(chosen), roster_slots=roster_slots, teams=teams, free_agents=free_agents, draft_pool=draft_pool, scoring=scoring, playoff_team_count=playoff_team_count, acquisition_budget=settings.get("acquisitionSettings",{}).get("acquisitionBudget"), rules=rules, schedule=schedule, raw_settings=normalized_settings)
 
 

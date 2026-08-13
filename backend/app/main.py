@@ -88,6 +88,9 @@ async def connect(req: ConnectRequest):
     global CURRENT
     try:
         CURRENT = await connect_espn(req.league_id, req.season, req.team_id)
+        if CURRENT.raw_settings.get("_team_selection_required"):
+            CURRENT = None
+            raise AppError(409,"TEAM_CONFIRMATION_REQUIRED","Choose which ESPN team is yours before activating the league.","Use the Streamlit connection flow to select your team; this API never guesses from response order.")
         if not CURRENT.teams:
             raise AppError(404,"LEAGUE_NOT_FOUND","ESPN did not return any teams for that league.","Check the league ID and season. For a private league, also verify your ESPN cookies.")
         save_state("current_league", CURRENT.model_dump(mode="json"))

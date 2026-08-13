@@ -48,6 +48,21 @@ def test_streamlit_starts_disconnected_without_displaying_demo_league():
     assert any(button.label == "Connect ESPN League" for button in app.button)
 
 
+def test_default_connection_surface_uses_url_not_technical_identifiers():
+    app_path = Path(__file__).resolve().parents[2] / "streamlit_app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=30).run()
+    next(button for button in app.button if button.label == "Connect ESPN League").click()
+    app = app.run()
+    labels = [field.label for field in app.text_input]
+    assert "Paste ESPN league URL" in labels
+    assert "League ID" not in labels
+    assert "Team ID" not in labels
+    assert "espn_s2 cookie" not in labels
+    assert "SWID cookie" not in labels
+    assert any(button.label == "Connect ESPN" for button in app.button)
+    assert [tab.label for tab in app.tabs][:3] == ["ESPN", "Sleeper", "Manual Setup"]
+
+
 def test_connected_draft_setup_plan_and_manual_live_flow():
     from app.demo import demo_league
 

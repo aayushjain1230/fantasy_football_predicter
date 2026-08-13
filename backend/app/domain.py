@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,42 @@ class ProviderReliabilityState(StrEnum):
     PARTIAL = "Partial"
     RATE_LIMITED = "Rate limited"
     AUTH_REQUIRED = "Authentication required"
+
+
+class LeagueConnectionStatus(StrEnum):
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    PARTIAL = "partial"
+    EXPIRED = "expired"
+    UNAVAILABLE = "unavailable"
+
+
+class ActiveLeagueState(BaseModel):
+    """The single metadata contract consumed by every connected page.
+
+    Authentication material intentionally does not belong in this model.
+    """
+
+    connection_provider: str
+    connection_status: LeagueConnectionStatus
+    league_id: str
+    league_name: str
+    season: int
+    team_id: str
+    team_name: str
+    league_size: int | None = None
+    league_size_source: str = "unavailable"
+    league_size_confirmed: bool = False
+    scoring_format: str
+    roster_slots: list[str] = Field(default_factory=list)
+    draft_type: str
+    draft_rounds: int
+    draft_position: int | None = None
+    draft_position_source: str = "unavailable"
+    draft_order_published: bool = False
+    last_synced_at: datetime
+    sync_message: str = "League synchronized"
 
 
 class Player(BaseModel):

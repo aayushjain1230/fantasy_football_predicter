@@ -15,9 +15,16 @@ Controls implemented:
 
 - Streamlit session state holds connected league state; shared caches are avoided for private league objects.
 - Shared ESPN cookies are not read from Streamlit secrets.
-- Private-league credentials entered in the connection form are password-masked,
-  passed directly to the ESPN request, and are not persisted in environment
-  variables, SQLite, exports, URLs, provider caches, or the connected league model.
+- Private-league session values are hidden in a collapsed advanced fallback,
+  password-masked, passed only as ESPN cookies, and never put in URLs, logs,
+  SQLite, exports, shared provider caches, or the normalized league/state models.
+- They remain in Streamlit session memory only to support explicit synchronization.
+  Disconnect ESPN invalidates the session cache and removes the values.
+- League URLs reject token-, cookie-, SWID-, and authorization-like query keys.
+- The centralized `ActiveLeagueState` contains metadata only and cannot contain
+  authentication material.
+- The browser extension is visibly disabled. It has no cookie read or transfer
+  implementation because no audited HTTPS handshake service is deployed.
 - Projection artifacts are repository-owned JSON files with schema and metadata validation.
 - CSV exports sanitize formula-like values.
 - FastAPI middleware limits request size, applies CORS checks, and rate-limits sensitive endpoints.
@@ -31,4 +38,8 @@ Remaining limitations:
   deployment operator controls the server process that makes the ESPN request.
 - SQLite is local/ephemeral and not cloud multi-user storage.
 - ESPN fantasy endpoints are unofficial and can change.
+- Streamlit Community Cloud is not the dedicated REST service required for a
+  one-click extension handshake. Such a service must use random five-minute
+  single-use codes, CSRF state, rate limiting, encrypted persistence if any,
+  revocation, redacted logs, and strict origin/extension allowlists.
 - No third-party analytics are enabled by default.

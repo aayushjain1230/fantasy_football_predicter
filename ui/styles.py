@@ -272,6 +272,16 @@ input::placeholder,textarea::placeholder { color:var(--fd-faint) !important; }
   *,*::before,*::after { animation-duration:.01ms !important; transition-duration:.01ms !important; }
 }
 
+.fd-league-card {
+  margin:14px 0; padding:20px; border:1px solid rgba(255,106,19,.28);
+  border-radius:14px; background:linear-gradient(145deg,#171c23,#10141a);
+  box-shadow:0 14px 32px rgba(0,0,0,.2);
+}
+.fd-league-name { color:var(--fd-text); font-size:1.08rem; font-weight:780; }
+.fd-league-meta,.fd-league-team,.fd-league-status { margin-top:7px; color:var(--fd-muted); font-size:.82rem; line-height:1.4; }
+.fd-league-team { color:var(--fd-text); font-weight:650; }
+.fd-league-status { color:var(--fd-gold); }
+
 /* 2026 product refresh: restrained, editorial, and decision-first. */
 :root {
   --fd-bg:#0b0e12;

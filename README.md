@@ -110,10 +110,10 @@ OPENWEATHER_API_KEY = ""
 DIGEST_WEBHOOK_URL = ""
 ```
 
-Do not put one user's `ESPN_S2` or `ESPN_SWID` cookies into shared Streamlit
-deployment secrets. Private-league users can enter both values in password
-fields during connection; Fourth Down uses them for that ESPN request and does
-not persist them.
+Do not put one user's ESPN session values into shared Streamlit deployment
+secrets. Private-league users may use the collapsed advanced connection fallback
+on a deployment they trust. Values remain in that Streamlit session only so
+explicit synchronization can work; **Disconnect ESPN** clears them.
 
 ### The Odds API in the website
 
@@ -142,19 +142,29 @@ matched; validation alone never creates a synthetic weather adjustment.
 
 Public ESPN leagues:
 
-- Enter a numeric ESPN league ID and season on the Connect League page
+- Open the league in ESPN and paste its HTTPS league URL
+- Fourth Down safely extracts the league and season; users do not handle IDs
 - Fourth Down requests ESPN's public fantasy endpoints
-- If ESPN denies access, the app explains that the league is likely private
+- The user explicitly confirms their team before the league becomes active
 
 Private ESPN leagues:
 
-- Enter the numeric league ID, season, and both `espn_s2` and `SWID` values
-- The credential fields are password-masked and cleared when the form submits
-- Credentials are sent only to ESPN for the connection request and are not
-  stored in SQLite, exports, URLs, caches, or the connected league object
+- The default screen never exposes raw session-field names
+- The collapsed advanced fallback accepts both required ESPN session values in
+  password-masked fields after the user has signed into ESPN normally
+- Values are sent only as cookies to ESPN, never in URLs, logs, league models,
+  SQLite, exports, or shared caches
+- Values remain in Streamlit session memory for **Sync now** and are cleared by
+  **Disconnect ESPN** or session reset
 - A local single-user environment may instead provide `ESPN_S2` and
   `ESPN_SWID` through `.env`
 - Only enter ESPN credentials on a deployment you trust, and never commit them
+
+ESPN does not offer a standard third-party OAuth flow for this use case. Account-
+wide private-league discovery therefore cannot be promised from an email address.
+The safe fallback is the pasted league URL plus an authenticated ESPN session.
+The `browser_extension/` package is a disabled Manifest V3 scaffold; it does not
+read or transfer cookies until a separate audited HTTPS handshake service exists.
 
 ## Provider Table
 

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Fourth Down ESPN Connector (Development Scaffold)",
+  "version": "0.1.0",
+  "description": "Disabled development scaffold for a future consent-based ESPN connection.",
+  "permissions": [],
+  "host_permissions": [],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Fourth Down ESPN Connector"
+  },
+  "background": {"service_worker": "background.js"}
+}

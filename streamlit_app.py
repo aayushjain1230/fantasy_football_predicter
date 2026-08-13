@@ -50,7 +50,7 @@ from app.advanced import (  # noqa: E402
     what_if,
 )
 from app.engine import optimize_lineup, project, user_team, waiver_moves  # noqa: E402
-from app.domain import League, Player, Team  # noqa: E402
+from app.domain import ActiveLeagueState, League, LeagueConnectionStatus, Player, Team  # noqa: E402
 from app import draft_intelligence as _draft_intelligence  # noqa: E402
 
 # Streamlit Cloud may hot-reload this entry point while retaining the previous
@@ -72,6 +72,18 @@ owner_of_pick = _draft_intelligence.owner_of_pick
 snake_next_pick = _draft_intelligence.snake_next_pick
 from app.projection_service import DEFAULT_PROJECTION_SERVICE, SUPPORTED_MODEL_POSITIONS, TRAINING_POLICY  # noqa: E402
 from app.providers import connect_espn, statuses  # noqa: E402
+from app.espn_connection import (  # noqa: E402
+    EspnSyncContext,
+    SessionEspnCredentials,
+    SessionLeagueCache,
+    build_active_league_state,
+    cached_league_connect,
+    clear_connection_state,
+    connect_with_backoff,
+    parse_espn_league_url,
+    safe_connection_error,
+    select_team,
+)
 from app.decision_service import build_weekly_brief, roster_outlook, value_based_faab  # noqa: E402
 from app.decision_journal import create_decision_entry  # noqa: E402
 from app.config import APP_VERSION, CONFIG, config_summary, validate_config  # noqa: E402
@@ -128,6 +140,16 @@ def ensure_state() -> None:
         st.session_state.league_connected = False
     if "espn_connection" not in st.session_state:
         st.session_state.espn_connection = None
+    if "active_league" not in st.session_state:
+        st.session_state.active_league = None
+    if "espn_candidate" not in st.session_state:
+        st.session_state.espn_candidate = None
+    if "espn_candidate_url" not in st.session_state:
+        st.session_state.espn_candidate_url = None
+    if "espn_cache" not in st.session_state:
+        st.session_state.espn_cache = SessionLeagueCache(ttl_seconds=300)
+    if "connection_error" not in st.session_state:
+        st.session_state.connection_error = None
     if "mode" not in st.session_state:
         st.session_state.mode = "disconnected"
     if "draft_picks" not in st.session_state:
@@ -186,6 +208,12 @@ def ensure_state() -> None:
         st.session_state.draft_workspace = "My Draft Plan"
     if st.session_state.get("my_team_view") not in {"Set My Lineup", "Waiver Adds", "Trades"}:
         st.session_state.my_team_view = "Set My Lineup"
+    if st.session_state.get("league_connected") and isinstance(st.session_state.get("league"), League) and not isinstance(st.session_state.get("active_league"), ActiveLeagueState):
+        try:
+            st.session_state.active_league = build_active_league_state(st.session_state.league, provider="Manual" if st.session_state.get("mode") == "manual" else "ESPN")
+        except ValueError:
+            st.session_state.league_connected = False
+            st.session_state.connection_error = {"status": "unavailable", "message": "Confirm which ESPN team is yours before using this league."}
 
 
 def client_fingerprint() -> str:
@@ -204,6 +232,9 @@ def action_allowed(bucket: str, limit: int, window: int) -> bool:
 
 
 def league_label(league) -> str:
+    active = st.session_state.get("active_league")
+    if isinstance(active, ActiveLeagueState):
+        return f"{active.connection_provider} · {active.connection_status.value.title()}"
     return "Live data"
 
 
@@ -427,6 +458,93 @@ def connect_error(exc: Exception) -> str:
     return "The league could not be connected. Check the league ID, season, team ID, and private-league credentials."
 
 
+def clear_espn_session() -> None:
+    clear_connection_state(st.session_state)
+    ensure_state()
+
+
+def activate_league(
+    league: League,
+    provider: str,
+    sync_context: EspnSyncContext | None = None,
+    *,
+    league_size: int | None = None,
+    league_size_confirmed: bool = False,
+    draft_position: int | None = None,
+    draft_position_source: str | None = None,
+) -> None:
+    active = build_active_league_state(
+        league,
+        provider=provider,
+        league_size=league_size,
+        league_size_confirmed=league_size_confirmed,
+        draft_position=draft_position,
+        draft_position_source=draft_position_source,
+    )
+    st.session_state.league = league
+    st.session_state.active_league = active
+    st.session_state.espn_connection = sync_context
+    st.session_state.league_connected = True
+    st.session_state.mode = "live" if provider == "ESPN" else "manual"
+    st.session_state.draft_picks = []
+    st.session_state.draft_configuration = None
+    st.session_state.draft_setup_confirmed = False
+    st.session_state.draft_league_size = active.league_size
+    st.session_state.draft_manager_confirmed = active.league_size_confirmed
+    st.session_state.draft_slot = active.draft_position
+    st.session_state.draft_slot_confirmed = active.draft_position_source in {"espn_draft_order", "espn_live_draft"}
+    st.session_state.draft_rounds = active.draft_rounds
+    st.session_state.current_pick = 1
+    st.session_state.simulation_cache = {}
+    st.session_state.connection_error = None
+
+
+async def import_espn_candidate(parsed, credentials: SessionEspnCredentials, *, force: bool = False) -> League:
+    cache: SessionLeagueCache = st.session_state.espn_cache
+    auth_scope = "private" if credentials.authenticated else "public"
+    return await cached_league_connect(
+        cache,
+        parsed.league_id,
+        parsed.season,
+        auth_scope,
+        lambda: connect_espn(
+            parsed.league_id,
+            parsed.season,
+            espn_s2=credentials.espn_s2,
+            espn_swid=credentials.swid,
+        ),
+        force=force,
+    )
+
+
+async def sync_espn_context(context: EspnSyncContext) -> League:
+    cache: SessionLeagueCache = st.session_state.espn_cache
+    cache.invalidate(context.league_id, context.season)
+    return await connect_with_backoff(
+        lambda: connect_espn(
+            context.league_id,
+            context.season,
+            context.team_id,
+            espn_s2=context.credentials.espn_s2,
+            espn_swid=context.credentials.swid,
+        )
+    )
+
+
+def preserve_synced_league(refreshed: League) -> None:
+    current = st.session_state.get("active_league")
+    st.session_state.league = refreshed
+    if isinstance(current, ActiveLeagueState):
+        st.session_state.active_league = build_active_league_state(
+            refreshed,
+            provider=current.connection_provider,
+            league_size=current.league_size,
+            league_size_confirmed=current.league_size_confirmed,
+            draft_position=current.draft_position,
+            draft_position_source=current.draft_position_source,
+        )
+
+
 def page_home(league) -> None:
     if not st.session_state.get("league_connected"):
         stadium_hero()
@@ -435,7 +553,7 @@ def page_home(league) -> None:
             st.rerun()
         warning_state(
             "Private leagues are supported",
-            "Use the private-league section in Settings. Credentials are used only for the current connection and are not saved by Fourth Down.",
+            "Paste your ESPN league URL in Settings. A collapsed session-only fallback is available for private leagues; Fourth Down never asks for your ESPN password.",
         )
         return
 
@@ -445,6 +563,17 @@ def page_home(league) -> None:
         f"{league.name} · Week {league.week}",
         [status_badge(league_label(league))],
     )
+    active = st.session_state.get("active_league")
+    if isinstance(active, ActiveLeagueState) and active.connection_status == LeagueConnectionStatus.PARTIAL:
+        st.warning("We imported your league, but the player pool is temporarily unavailable. Your league connection is still active.")
+        if st.button("Retry Player Pool", use_container_width=True, disabled=not isinstance(st.session_state.get("espn_connection"), EspnSyncContext)):
+            try:
+                with st.spinner("Retrying ESPN player pool…"):
+                    preserve_synced_league(asyncio.run(sync_espn_context(st.session_state.espn_connection)))
+                st.rerun()
+            except Exception as exc:
+                _, message = safe_connection_error(exc)
+                st.error(message)
     brief = build_weekly_brief(league)
     metric_grid(
         [
@@ -480,147 +609,98 @@ def page_home(league) -> None:
 
 
 def page_connect() -> None:
-    st.header("Connect ESPN League")
-    st.write("Connect with your league ID. Fourth Down never asks for your ESPN email or password.")
-    with st.form("connect", clear_on_submit=False):
-        league_id = st.text_input("League ID", value="")
-        season = st.number_input("Season", min_value=2020, max_value=2030, value=2026, step=1)
-        team_id = st.text_input("Team (optional ESPN team ID)", value="")
-        with st.expander("Private league? Open secure connection instructions"):
-            st.caption(
-                "Stay signed in at ESPN in your own browser. In Developer Tools → Application/Storage → Cookies → espn.com, copy espn_s2 and SWID from the same session. "
-                "Do not enter your ESPN email or password. These cookie values stay only in this Streamlit session, are sent only to ESPN for your requests, and are wiped on disconnect/reset."
-            )
-            espn_s2 = st.text_input(
-                "espn_s2 cookie",
-                value="",
-                type="password",
-                help="Copy the complete espn_s2 value from espn.com. Either the raw value or an espn_s2=value fragment is accepted.",
-            )
-            espn_swid = st.text_input(
-                "SWID cookie",
-                value="",
-                type="password",
-                help="Copy the SWID value from the same ESPN browser session. Raw UUID, {UUID}, or SWID={UUID} formats are accepted.",
-            )
-        with st.expander("Fourth Down browser extension (future)"):
-            st.caption("Not available yet. This reserved interface will eventually accept a locally authorized league/draft handoff from an installed, tested extension. Fourth Down does not claim extension sync exists today.")
-        submitted = st.form_submit_button("Connect League")
-    if submitted:
-        league_id = league_id.strip()
-        team_id = team_id.strip()
-        if not LEAGUE_RE.match(league_id):
-            st.error("League ID must be 1 to 30 digits.")
-            return
-        if team_id and not TEAM_RE.match(team_id):
-            st.error("Team ID must be 1 to 10 digits.")
-            return
-        if not action_allowed("espn-connect", 6, 300):
-            return
-        try:
-            with st.spinner("Requesting league data from ESPN..."):
-                league = asyncio.run(
-                    connect_espn(
-                        league_id,
-                        int(season),
-                        team_id or None,
-                        espn_s2=espn_s2,
-                        espn_swid=espn_swid,
-                    )
-                )
-            st.session_state.league = league
-            st.session_state.espn_connection = {
-                "league_id": league_id,
-                "season": int(season),
-                "team_id": team_id or None,
-                "espn_s2": espn_s2,
-                "espn_swid": espn_swid,
-            }
-            st.session_state.mode = "live"
-            st.session_state.league_connected = True
-            st.session_state.draft_picks = []
-            manager_resolution = resolve_manager_count(league)
-            seat_resolution = resolve_draft_slot(league)
-            st.session_state.draft_league_size = manager_resolution.value
-            st.session_state.draft_slot = seat_resolution.value
-            st.session_state.draft_manager_confirmed = False
-            st.session_state.draft_slot_confirmed = False
-            st.session_state.draft_setup_confirmed = False
-            st.session_state.draft_manual_started = False
-            st.session_state.draft_ignored = []
-            roster_counts = (league.raw_settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
-            st.session_state.draft_rounds = len(league.roster_slots) + int(roster_counts.get("20", roster_counts.get(20, 7)) or 7)
-            st.session_state.playoff_scenarios = []
-            st.session_state.playoff_scenario_history = []
-            st.session_state.simulation_cache = {}
-            st.success(f"Connected to {league.name}.")
-            if league.raw_settings.get("_draft_pool_diagnostics", {}).get("status") != "LIVE":
-                st.warning("The league connected, but ESPN's draft-player pool is unavailable. Open Draft to see safe request and normalization counts.")
-        except Exception as exc:
-            st.error(connect_error(exc))
-    with st.expander("ESPN unavailable? Use manual draft setup"):
-        st.caption("Upload your own rankings CSV to plan without ESPN. Required columns: player, position. Optional: team, rank, adp, projection. Nothing is uploaded outside this Streamlit session.")
-        manual_team = st.text_input("Your team name", value="My Team", key="manual-team-name")
-        manual_size = st.number_input("Managers", 4, 20, 10, 1, key="manual-manager-count")
-        ranking_file = st.file_uploader("Ranking CSV", type=["csv"], key="manual-rankings")
-        if st.button("Continue with Manual Setup", disabled=ranking_file is None, use_container_width=True):
+    page_header("Connect Your Fantasy League", "League Setup", "Import your league to personalize draft, lineup, waiver, and trade recommendations.")
+    espn_tab, sleeper_tab, manual_tab = st.tabs(["ESPN", "Sleeper", "Manual Setup"])
+    with espn_tab:
+        section_header("ESPN", "Import league settings, teams, rosters, scoring, and available draft information.")
+        st.markdown("**Fourth Down never sees or stores your ESPN password.**")
+        st.caption("Fourth Down uses league data in read-only mode and never makes roster changes on your behalf.")
+        with st.form("espn-url-connect", clear_on_submit=False):
+            league_url = st.text_input("Paste ESPN league URL", placeholder="Open your ESPN league and paste the URL here")
+            with st.expander("Private league · advanced session connection"):
+                st.warning("Sensitive session values act like passwords. Use this only on a Fourth Down deployment you trust. They remain in this Streamlit session so Sync now can work, and Disconnect ESPN removes them.")
+                st.caption("Sign into ESPN normally in this browser first. Fourth Down never asks for your ESPN email or password.")
+                espn_s2 = st.text_input("ESPN session value", type="password", key="private-espn-s2")
+                swid = st.text_input("ESPN account session value", type="password", key="private-swid")
+            connect_clicked = st.form_submit_button("Connect ESPN", type="primary", use_container_width=True)
+        if connect_clicked and action_allowed("espn-connect", 6, 300):
             try:
-                text = ranking_file.getvalue().decode("utf-8-sig")
-                if len(text) > 2_000_000:
-                    raise ValueError("FILE_TOO_LARGE")
-                rows = list(csv.DictReader(io.StringIO(text)))
+                parsed = parse_espn_league_url(league_url, default_season=datetime.now(UTC).year)
+                credentials = SessionEspnCredentials(espn_s2.strip(), swid.strip())
+                with st.spinner("Importing league from ESPN…"):
+                    candidate = asyncio.run(import_espn_candidate(parsed, credentials))
+                st.session_state.espn_candidate = candidate
+                st.session_state.espn_candidate_url = parsed
+                st.session_state.espn_candidate_credentials = credentials
+            except Exception as exc:
+                status, message = safe_connection_error(exc)
+                st.session_state.connection_error = {"status": status.value, "message": message}
+        error = st.session_state.get("connection_error")
+        if error:
+            st.error(error["message"])
+        candidate = st.session_state.get("espn_candidate")
+        parsed = st.session_state.get("espn_candidate_url")
+        if isinstance(candidate, League) and parsed:
+            section_header("Choose Your Team", "ESPN returned this league. Confirm which team is yours before activating it.")
+            manager = resolve_manager_count(candidate)
+            seat = resolve_draft_slot(candidate)
+            selected_team = st.selectbox("Your team", candidate.teams, format_func=lambda team: team.name, key="candidate-team")
+            card_league = select_team(candidate, selected_team.id)
+            st.markdown(
+                f'<div class="fd-league-card"><div class="fd-league-name">{h(card_league.name)}</div>'
+                f'<div class="fd-league-meta">{card_league.season} · {manager.value or "Confirm size"} Teams · {h(build_draft_configuration(card_league).scoring_format)} · {h(league_draft_type(card_league).title())} Draft</div>'
+                f'<div class="fd-league-team">Your Team: {h(selected_team.name)}</div>'
+                f'<div class="fd-league-status">Draft Position: {seat.value if seat.source in {"espn_draft_order", "espn_live_draft"} else "Not Published"}</div></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Use This League", type="primary", use_container_width=True):
+                credentials = st.session_state.get("espn_candidate_credentials") or SessionEspnCredentials()
+                context = EspnSyncContext(parsed.league_id, parsed.season, selected_team.id, parsed.canonical_url, credentials)
+                activate_league(card_league, "ESPN", context)
+                st.session_state.pending_page = "Home"
+                st.rerun()
+        with st.expander("One-click browser connection"):
+            st.info("Coming after a dedicated encrypted HTTPS handshake service is deployed and tested. The extension is not active in this Streamlit deployment.")
+    with sleeper_tab:
+        st.info("Sleeper import is not connected yet. Fourth Down will not pretend a league was imported. Use ESPN or Manual Setup.")
+    with manual_tab:
+        section_header("Manual Setup", "Use real settings you enter. Manual leagues are always labeled Manual.")
+        with st.form("manual-league-setup"):
+            name = st.text_input("League name", "My League")
+            team_name = st.text_input("Your team name", "My Team")
+            a, b, c = st.columns(3)
+            size = a.number_input("Managers", 4, 20, 10, 1)
+            scoring = b.selectbox("Scoring", ["full PPR", "half PPR", "standard"])
+            draft_type = c.selectbox("Draft type", ["snake", "linear", "auction"])
+            seat = st.selectbox("Expected draft position", list(range(1, int(size) + 1)), disabled=draft_type == "auction")
+            slots_text = st.text_input("Starting roster slots", "QB,RB,RB,WR,WR,TE,FLEX,DST,K")
+            bench = st.number_input("Bench players", 0, 20, 7, 1)
+            ranking_file = st.file_uploader("Optional rankings CSV", type=["csv"], key="manual-rankings")
+            manual_clicked = st.form_submit_button("Use Manual League", type="primary", use_container_width=True)
+        if manual_clicked:
+            slots = [slot.strip().upper() for slot in slots_text.split(",") if slot.strip().upper() in {"QB", "RB", "WR", "TE", "FLEX", "SUPERFLEX", "DST", "K"}]
+            if not slots:
+                st.error("Add at least one valid starting roster slot.")
+            else:
                 players = []
-                for index, row in enumerate(rows[:1500], 1):
-                    name = str(row.get("player") or row.get("name") or "").strip()[:80]
-                    position = str(row.get("position") or "").strip().upper()
-                    if not name or position not in {"QB", "RB", "WR", "TE", "K", "DST"}:
-                        continue
-                    adp_text = row.get("adp") or row.get("rank")
-                    projection_text = row.get("projection")
-                    adp = float(adp_text) if adp_text not in (None, "") else float(index)
-                    projection = float(projection_text) if projection_text not in (None, "") else None
-                    players.append(Player(id=f"upload-{index}", name=name, position=position, team=str(row.get("team") or "FA")[:5], mean=max(0, (projection or 0) / 17), stdev=max(.1, (projection or 0) * .02), rostered=False, projection_available=projection is not None, projection_source="User-uploaded ranking CSV", season_projection=projection, average_draft_position=adp, draft_pool_rank=index))
-                if not players:
-                    raise ValueError("NO_VALID_PLAYERS")
-                teams = [Team(id=str(index), name=manual_team if index == 1 else f"Team {index}", players=[]) for index in range(1, int(manual_size) + 1)]
-                league = League(id="manual-session", name="Manual Draft", season=datetime.now(UTC).year, week=1, user_team_id="1", roster_slots=["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "DST", "K"], teams=teams, free_agents=players, draft_pool=players, raw_settings={"size": int(manual_size), "draftSettings": {"type": "SNAKE"}, "_manual_setup": True})
-                st.session_state.league = league
-                st.session_state.league_connected = True
-                st.session_state.mode = "manual"
-                st.session_state.espn_connection = None
-                st.session_state.draft_league_size = int(manual_size)
-                st.session_state.draft_manager_confirmed = True
-                st.session_state.draft_slot = None
-                st.session_state.draft_slot_confirmed = False
-                st.session_state.draft_setup_confirmed = False
+                try:
+                    rows = list(csv.DictReader(io.StringIO(ranking_file.getvalue().decode("utf-8-sig")))) if ranking_file else []
+                    for index, row in enumerate(rows[:1500], 1):
+                        player_name = str(row.get("player") or row.get("name") or "").strip()[:80]
+                        position = str(row.get("position") or "").strip().upper()
+                        if not player_name or position not in {"QB", "RB", "WR", "TE", "K", "DST"}: continue
+                        projection = float(row["projection"]) if row.get("projection") else None
+                        adp = float(row.get("adp") or row.get("rank") or index)
+                        players.append(Player(id=f"upload-{index}", name=player_name, position=position, team=str(row.get("team") or "FA")[:5], eligible_slots={position, *({"FLEX"} if position in {"RB", "WR", "TE"} else set())}, mean=max(0, (projection or 0) / 17), stdev=max(.1, (projection or 0) * .02), rostered=False, projection_available=projection is not None, projection_source="User-uploaded rankings", season_projection=projection, average_draft_position=adp, draft_pool_rank=index))
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    st.error("The rankings CSV could not be read. Numeric ADP and projection fields must contain numbers.")
+                    return
+                teams = [Team(id=str(index), name=team_name if index == 1 else f"Team {index}", players=[]) for index in range(1, int(size) + 1)]
+                reception = 1 if scoring == "full PPR" else .5 if scoring == "half PPR" else 0
+                league = League(id="manual-session", name=name[:80], season=datetime.now(UTC).year, week=1, user_team_id="1", roster_slots=slots, teams=teams, free_agents=players, draft_pool=players, raw_settings={"size": int(size), "draftSettings": {"type": draft_type.upper()}, "rosterSettings": {"lineupSlotCounts": {"20": int(bench)}}, "scoringSettings": {"scoringItems": [{"statId": 53, "points": reception}]}, "_manual_setup": True})
+                activate_league(league, "Manual", league_size=int(size), league_size_confirmed=True, draft_position=int(seat) if draft_type != "auction" else None, draft_position_source="manual" if draft_type != "auction" else "unavailable")
                 st.session_state.pending_page = "Draft"
                 st.rerun()
-            except (UnicodeDecodeError, ValueError, TypeError):
-                st.error("The CSV could not be used. Include valid player and position columns; optional numeric rank, ADP, and projection values must be numbers.")
-    if st.button("Disconnect league"):
-        st.session_state.league = None
-        st.session_state.espn_connection = None
-        st.session_state.mode = "disconnected"
-        st.session_state.league_connected = False
-        st.session_state.draft_picks = []
-        st.session_state.draft_setup_confirmed = False
-        st.session_state.draft_manager_confirmed = False
-        st.session_state.draft_slot_confirmed = False
-        st.session_state.draft_manual_started = False
-        st.session_state.draft_ignored = []
-        st.session_state.playoff_scenarios = []
-        st.session_state.playoff_scenario_history = []
-        st.session_state.simulation_cache = {}
-        st.session_state.odds_api_key = ""
-        st.session_state.odds_connection = None
-        st.session_state.openweather_api_key = ""
-        st.session_state.openweather_connection = None
-        st.session_state.decision_journal = []
-        st.rerun()
-    st.info(
-        "League data is browser-session scoped and may reset when Streamlit reconnects. "
-        "Private ESPN credentials remain only in this browser session so Live Draft can refresh ESPN; disconnect or Reset Session wipes them."
-    )
 
 
 def page_dashboard(league) -> None:
@@ -974,9 +1054,9 @@ def page_draft_room(league) -> None:
                 st.warning("Reconnect the league once to enable ESPN draft checks. Manual mode is still available.")
             elif action_allowed("espn-draft-sync", 20, 300):
                 try:
-                    refreshed = asyncio.run(connect_espn(**connection))
+                    refreshed = asyncio.run(sync_espn_context(connection))
                     picks = synced_picks_for_configuration(list(refreshed.raw_settings.get("_draft_picks", [])), config)
-                    st.session_state.league = refreshed
+                    preserve_synced_league(refreshed)
                     st.session_state.draft_last_sync = datetime.now(UTC).isoformat()
                     if picks:
                         st.session_state.draft_picks = picks
@@ -1007,9 +1087,9 @@ def page_draft_room(league) -> None:
             refresh_b.warning("This manual draft has no ESPN refresh connection.")
         elif action_allowed("espn-draft-sync", 20, 300):
             try:
-                refreshed = asyncio.run(connect_espn(**connection))
+                refreshed = asyncio.run(sync_espn_context(connection))
                 picks = synced_picks_for_configuration(list(refreshed.raw_settings.get("_draft_picks", [])), config)
-                st.session_state.league = refreshed
+                preserve_synced_league(refreshed)
                 st.session_state.draft_last_sync = datetime.now(UTC).isoformat()
                 if picks:
                     st.session_state.draft_picks = picks
@@ -1128,9 +1208,9 @@ def page_draft_room(league) -> None:
         elif action_allowed("espn-draft-sync", 20, 300):
             try:
                 with st.spinner("Loading the latest ESPN selections..."):
-                    refreshed = asyncio.run(connect_espn(**connection))
+                    refreshed = asyncio.run(sync_espn_context(connection))
                 espn_picks = list(refreshed.raw_settings.get("_draft_picks", []))
-                st.session_state.league = refreshed
+                preserve_synced_league(refreshed)
                 if espn_picks:
                     st.session_state.draft_picks = espn_picks
                     st.session_state.current_pick = max(pick["number"] for pick in espn_picks) + 1
@@ -1651,8 +1731,13 @@ def page_league(league) -> None:
 
 def page_draft_context(league) -> None:
     page_header("Draft", "Draft Assistant", "Plan each round before the draft, then get one clear answer while you are on the clock.", [status_badge(league_label(league))])
-    manager_resolution = resolve_manager_count(league, st.session_state.get("draft_league_size"), manual_confirmed=bool(st.session_state.get("draft_manager_confirmed")))
-    seat_resolution = resolve_draft_slot(league, st.session_state.get("draft_slot"), manual_confirmed=bool(st.session_state.get("draft_slot_confirmed")))
+    active = st.session_state.get("active_league")
+    manager_value = active.league_size if isinstance(active, ActiveLeagueState) else st.session_state.get("draft_league_size")
+    manager_confirmed = active.league_size_confirmed if isinstance(active, ActiveLeagueState) else bool(st.session_state.get("draft_manager_confirmed"))
+    seat_value = active.draft_position if isinstance(active, ActiveLeagueState) else st.session_state.get("draft_slot")
+    seat_manual = isinstance(active, ActiveLeagueState) and active.draft_position_source == "manual"
+    manager_resolution = resolve_manager_count(league, manager_value, manual_confirmed=manager_confirmed)
+    seat_resolution = resolve_draft_slot(league, seat_value, manual_confirmed=seat_manual)
     if not st.session_state.get("draft_setup_confirmed"):
         section_header("1. Draft Setup", "Confirm the facts that control every pick and recommendation.")
         if manager_resolution.conflict_values:
@@ -1705,6 +1790,14 @@ def page_draft_context(league) -> None:
             st.session_state.draft_rounds = int(rounds)
             st.session_state.draft_manager_confirmed = True
             st.session_state.draft_slot_confirmed = True
+            if isinstance(active, ActiveLeagueState):
+                st.session_state.active_league = active.model_copy(update={
+                    "league_size": int(managers), "league_size_source": "manual", "league_size_confirmed": True,
+                    "draft_position": int(seat) if draft_type != "auction" else None,
+                    "draft_position_source": active.draft_position_source if active.draft_order_published and int(seat) == active.draft_position else "manual" if draft_type != "auction" else "unavailable",
+                    "draft_order_published": active.draft_order_published,
+                    "scoring_format": scoring, "roster_slots": starting_slots, "draft_type": draft_type, "draft_rounds": int(rounds),
+                })
             st.session_state.draft_setup_confirmed = True
             st.session_state.draft_workspace = "My Draft Plan"
             st.session_state.draft_picks = []
@@ -1750,9 +1843,30 @@ def page_settings(league) -> None:
         team = user_team(league)
         st.success(f"Connected to {league.name}")
         st.write(f"Team: **{team.name}** · Season {league.season} · Week {league.week}")
-        if st.button("Disconnect League", use_container_width=True):
-            for key in ["league", "espn_connection", "mode", "league_connected", "draft_picks", "draft_configuration", "draft_setup_confirmed", "draft_slot", "draft_league_size", "odds_api_key", "odds_connection", "openweather_api_key", "openweather_connection"]:
-                st.session_state.pop(key, None)
+        active = st.session_state.get("active_league")
+        if isinstance(active, ActiveLeagueState):
+            st.caption(f"Last synchronized {active.last_synced_at.astimezone().strftime('%b %d, %Y · %I:%M %p')}")
+            if active.connection_status == LeagueConnectionStatus.EXPIRED:
+                st.error(active.sync_message)
+                if st.button("Reconnect ESPN", use_container_width=True):
+                    clear_espn_session()
+                    st.rerun()
+        sync_col, disconnect_col = st.columns(2)
+        if sync_col.button("Sync now", type="primary", use_container_width=True, disabled=not isinstance(st.session_state.get("espn_connection"), EspnSyncContext)):
+            if action_allowed("espn-sync", 12, 300):
+                try:
+                    with st.spinner("Synchronizing with ESPN…"):
+                        refreshed = asyncio.run(sync_espn_context(st.session_state.espn_connection))
+                    preserve_synced_league(refreshed)
+                    st.success("League synchronized.")
+                    st.rerun()
+                except Exception as exc:
+                    status, message = safe_connection_error(exc)
+                    if isinstance(active, ActiveLeagueState):
+                        st.session_state.active_league = active.model_copy(update={"connection_status": status, "sync_message": message})
+                    st.error(message)
+        if disconnect_col.button("Disconnect ESPN" if st.session_state.get("mode") == "live" else "Disconnect League", use_container_width=True):
+            clear_espn_session()
             st.rerun()
         with st.expander("Connect a different league"):
             page_connect()
