@@ -566,7 +566,7 @@ def page_home(league) -> None:
             st.rerun()
         warning_state(
             "Private leagues are supported",
-            "Paste your ESPN league URL in Settings. A collapsed session-only fallback is available for private leagues; Fourth Down never asks for your ESPN password.",
+            "Choose Private league in Settings, enter the league address and secure ESPN session values, then connect. Fourth Down never asks for your ESPN password.",
         )
         return
 
@@ -625,23 +625,27 @@ def page_connect() -> None:
     page_header("Connect Your Fantasy League", "League Setup", "Import your league to personalize draft, lineup, waiver, and trade recommendations.")
     espn_tab, sleeper_tab, manual_tab = st.tabs(["ESPN", "Sleeper", "Manual Setup"])
     with espn_tab:
-        st.markdown(
-            '<div class="fd-provider-grid">'
-            '<div class="fd-provider-card fd-provider-card--selected"><div class="fd-provider-name">ESPN</div><div class="fd-provider-copy">League URL import with private-session fallback.</div></div>'
-            '<div class="fd-provider-card"><div class="fd-provider-name">Sleeper</div><div class="fd-provider-copy">Not connected yet.</div></div>'
-            '<div class="fd-provider-card"><div class="fd-provider-name">Manual</div><div class="fd-provider-copy">Enter your league rules yourself.</div></div>'
-            '</div>', unsafe_allow_html=True,
-        )
-        section_header("ESPN", "Import league settings, teams, rosters, scoring, and available draft information.")
+        section_header("Connect ESPN", "Import your league, team, scoring, rosters, and draft settings in one connection.")
         st.markdown('<div class="fd-security-note"><strong>Fourth Down never sees or stores your ESPN password.</strong><br>League data is read-only; Fourth Down never makes roster changes on your behalf.</div>', unsafe_allow_html=True)
-        st.markdown('<div class="fd-connect-panel"><div class="fd-provider-name">Connect ESPN</div><div class="fd-provider-copy">Open your league in ESPN, then paste its address below.</div></div>', unsafe_allow_html=True)
+        connection_kind = st.radio("League access", ("Public league", "Private league"), horizontal=True, key="espn-connection-kind")
+        private_connection = connection_kind == "Private league"
+        st.markdown(
+            '<div class="fd-connect-panel"><div class="fd-provider-name">'
+            + ("Private ESPN league" if private_connection else "Public ESPN league")
+            + '</div><div class="fd-provider-copy">'
+            + ("Paste the league address and your two session values, then connect once." if private_connection else "Paste the address of your ESPN league, then connect.")
+            + '</div></div>',
+            unsafe_allow_html=True,
+        )
         with st.form("espn-url-connect", clear_on_submit=False):
             league_url = st.text_input("Paste ESPN league URL", placeholder="Open your ESPN league and paste the URL here")
-            with st.expander("Private league · advanced session connection"):
-                st.warning("Sensitive session values act like passwords. Use this only on a Fourth Down deployment you trust. They remain in this Streamlit session so Sync now can work, and Disconnect ESPN removes them.")
-                st.caption("Sign into ESPN normally in this browser first. Fourth Down never asks for your ESPN email or password.")
-                espn_s2 = st.text_input("ESPN session value", type="password", key="private-espn-s2")
-                swid = st.text_input("ESPN account session value", type="password", key="private-swid")
+            if private_connection:
+                espn_s2 = st.text_input("ESPN secure session", type="password", key="private-espn-s2", help="The espn_s2 value from your signed-in ESPN browser session.")
+                swid = st.text_input("ESPN account session", type="password", key="private-swid", help="The SWID value from the same signed-in ESPN browser session.")
+                st.caption("These values stay only in this app session and are cleared when you disconnect.")
+            else:
+                espn_s2 = ""
+                swid = ""
             connect_clicked = st.form_submit_button("Connect ESPN", type="primary", use_container_width=True)
         if connect_clicked and action_allowed("espn-connect", 6, 300):
             try:
@@ -681,13 +685,9 @@ def page_connect() -> None:
                 activate_league(card_league, "ESPN", context)
                 st.session_state.pending_page = "Home"
                 st.rerun()
-        with st.expander("One-click browser connection"):
-            st.info("Coming after a dedicated encrypted HTTPS handshake service is deployed and tested. The extension is not active in this Streamlit deployment.")
     with sleeper_tab:
-        st.markdown('<div class="fd-provider-grid"><div class="fd-provider-card"><div class="fd-provider-name">ESPN</div></div><div class="fd-provider-card fd-provider-card--selected"><div class="fd-provider-name">Sleeper</div><div class="fd-provider-copy">Unavailable in this release.</div></div><div class="fd-provider-card"><div class="fd-provider-name">Manual</div></div></div>', unsafe_allow_html=True)
         st.info("Sleeper import is not connected yet. Fourth Down will not pretend a league was imported. Use ESPN or Manual Setup.")
     with manual_tab:
-        st.markdown('<div class="fd-provider-grid"><div class="fd-provider-card"><div class="fd-provider-name">ESPN</div></div><div class="fd-provider-card"><div class="fd-provider-name">Sleeper</div></div><div class="fd-provider-card fd-provider-card--selected"><div class="fd-provider-name">Manual</div><div class="fd-provider-copy">You control every league setting.</div></div></div>', unsafe_allow_html=True)
         section_header("Manual Setup", "Use real settings you enter. Manual leagues are always labeled Manual.")
         with st.form("manual-league-setup"):
             name = st.text_input("League name", "My League")

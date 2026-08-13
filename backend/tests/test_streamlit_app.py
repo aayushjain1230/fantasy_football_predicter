@@ -63,6 +63,16 @@ def test_default_connection_surface_uses_url_not_technical_identifiers():
     assert [tab.label for tab in app.tabs][:3] == ["ESPN", "Sleeper", "Manual Setup"]
 
 
+def test_private_connection_is_one_direct_form_without_extra_expanders():
+    source = (Path(__file__).resolve().parents[2] / "streamlit_app.py").read_text(encoding="utf-8")
+    assert '("Public league", "Private league")' in source
+    assert 'st.text_input("ESPN secure session"' in source
+    assert 'st.text_input("ESPN account session"' in source
+    assert 'st.form_submit_button("Connect ESPN"' in source
+    assert 'st.expander("Private league' not in source
+    assert 'st.expander("One-click browser connection")' not in source
+
+
 def test_connected_draft_setup_plan_and_manual_live_flow():
     from app.demo import demo_league
 
